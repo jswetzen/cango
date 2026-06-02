@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+coverage/
+.turbo/
+.pnpm-store/
+
+# Local design/planning docs — not for the public/shared repo
+PLAN.md
+ok-design-the-calendar-vivid-honey.md

@@ -1,0 +1,33 @@
+# Cango rules — the tiebreaker layer for non-series events.
+# Copy to /data/cango/rules.yaml. Rules are evaluated top-to-bottom;
+# first match wins. They only fire AFTER structural checks (declined,
+# self-organized-solo, tentative) and attendance edges, and BEFORE the
+# source default. See PLAN.md "Resolution layers".
+
+rules:
+  # Standups are optional for me — downgrade to soft so they never hard-block.
+  - id: standups-optional
+    match:
+      sourceId: src-work
+      titleRegex: "(?i)stand-?up"
+    role: soft
+    reason: Daily standup is optional
+
+  # Big all-hands I've accepted are real commitments.
+  - id: all-hands-hard
+    match:
+      sourceId: src-work
+      titleRegex: "(?i)all[- ]hands"
+      rsvpStatusIn: [accepted]
+    role: hard
+    reason: Accepted all-hands
+
+  # Meetings I organized but only I attend are just focus blocks (soft).
+  # (Structural layer already handles attendeeCount === 1; this catches
+  # organizer-self meetings the structural rule misses.)
+  - id: my-own-meetings-soft
+    match:
+      sourceId: src-work
+      organizerIsSelf: true
+    role: soft
+    reason: Self-organized — movable

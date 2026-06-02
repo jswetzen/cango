@@ -1,0 +1,25 @@
+{
+  "name": "@cango/daemon",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cango sidecar daemon. Bun runtime, Unix-socket JSON-RPC, SQLite cache, cron refresh.",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/main.ts",
+    "start": "bun run src/main.ts",
+    "cli": "bun run src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@cango/adapter-caldav": "workspace:*",
+    "@cango/adapter-ics": "workspace:*",
+    "@cango/core": "workspace:*",
+    "yaml": "2.9.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/bun": "1.1.14",
+    "typescript": "5.6.3"
+  }
+}

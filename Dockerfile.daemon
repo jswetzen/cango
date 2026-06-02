@@ -1,0 +1,44 @@
+# Cango sidecar daemon image.
+#
+# Bun runs the daemon's TypeScript directly; the workspace libraries
+# (@cango/core + adapters) are consumed via their built dist/, so we run a
+# pnpm build for those before launching. knowitall and all mikro-iac
+# deployment wiring live outside this repo.
+
+FROM oven/bun:1.1.38-slim AS base
+WORKDIR /app
+
+# pnpm via corepack (pinned by the root package.json packageManager field).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable
+
+# ---- deps layer ---------------------------------------------------------
+FROM base AS deps
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+COPY packages/core/package.json packages/core/
+COPY packages/adapter-ics/package.json packages/adapter-ics/
+COPY packages/adapter-caldav/package.json packages/adapter-caldav/
+COPY packages/daemon/package.json packages/daemon/
+RUN corepack pnpm install --frozen-lockfile
+
+# ---- build layer (compile libs to dist/) --------------------------------
+FROM deps AS build
+COPY packages ./packages
+RUN corepack pnpm --filter @cango/core --filter @cango/adapter-ics \
+        --filter @cango/adapter-caldav build
+
+# ---- runtime ------------------------------------------------------------
+FROM base AS runtime
+ENV NODE_ENV=production \
+    CANGO_DATA_DIR=/data/cango \
+    CANGO_SOCKET_PATH=/run/cango/cango.sock
+COPY --from=build /app /app
+WORKDIR /app/packages/daemon
+
+# Healthcheck: call the health RPC over the socket via cango-cli.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD bun run src/cli.ts health > /dev/null 2>&1 || exit 1
+
+CMD ["bun", "run", "src/main.ts"]

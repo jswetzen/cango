@@ -1,0 +1,75 @@
+# Cango FamilyGraph + source definitions (V1 single source of truth).
+# Copy to /data/cango/family.yaml and fill in real feeds + credentials.
+#
+# Each source's `ownerId` is the person whose availability the source's events
+# count against. For an organization feed (a club, a school) that a family
+# member follows, set ownedBy: organization but point ownerId at the *person*
+# who attends — that's the personId stamped on every event from the feed, and
+# the key attendance edges resolve against.
+
+settings:
+  refreshIntervalMinutes: 60
+  maxStaleHours: 6
+
+people:
+  - id: p-me
+    name: Me
+    sourceIds: [src-work, src-personal]
+  - id: p-wife
+    name: Wife
+    sourceIds: [src-wife-work]
+  - id: p-kid
+    name: Kid
+    sourceIds: [src-football]
+
+organizations:
+  - id: org-football
+    name: Local Football Club
+    sourceIds: [src-football]
+
+sources:
+  # Work calendar over CalDAV. Many meetings are optional — see rules.yaml.
+  - id: src-work
+    kind: caldav
+    ownedBy: person
+    ownerId: p-me
+    defaultRole: hard
+    serverUrl: https://caldav.example.com/
+    username: me@example.com
+    password: ${CANGO_WORK_PASSWORD}   # daemon expands from /etc/cango.env
+    calendarName: Work
+    selfEmail: me@example.com
+
+  # Personal ICS feed (read-only share URL).
+  - id: src-personal
+    kind: ics
+    ownedBy: person
+    ownerId: p-me
+    defaultRole: hard
+    url: https://calendar.example.com/me/personal.ics
+
+  - id: src-wife-work
+    kind: ics
+    ownedBy: person
+    ownerId: p-wife
+    defaultRole: hard
+    url: https://calendar.example.com/wife/work.ics
+
+  # Club feed the kid follows. NEVER_ATTENDS edges (below) suppress the
+  # sessions the kid doesn't actually go to.
+  - id: src-football
+    kind: ics
+    ownedBy: organization
+    ownerId: p-kid
+    defaultRole: info
+    url: https://football.example.com/team-a.ics
+
+attendance:
+  - personId: p-kid
+    seriesId: football-u11-training
+    role: ATTENDS
+    reason: Kid is on the U11 squad
+  - personId: p-kid
+    seriesId: football-u9-training
+    role: NEVER_ATTENDS
+    reason: Wrong age group, ignore

@@ -1,0 +1,31 @@
+{
+  "name": "@cango/adapter-ics",
+  "version": "0.0.0",
+  "description": "ICS feed adapter for Cango. Parses + expands RRULEs, normalizes to CalEvent.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@cango/core": "workspace:*",
+    "node-ical": "0.20.1",
+    "rrule": "2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.16.11",
+    "typescript": "5.6.3",
+    "vitest": "2.1.4"
+  }
+}
