@@ -1,33 +1,42 @@
 # Cango sidecar daemon image.
 #
 # Bun runs the daemon's TypeScript directly; the workspace libraries
-# (@cango/core + adapters) are consumed via their built dist/, so we run a
-# pnpm build for those before launching. knowitall and all mikro-iac
-# deployment wiring live outside this repo.
+# (@cango/core + adapters) are consumed via their built dist/, so we build
+# those before launching. knowitall and all mikro-iac deployment wiring live
+# outside this repo.
+#
+# Fully bun-native: the oven/bun-slim image ships no Node.js, so we install
+# and build with bun rather than pnpm/corepack — both of which are Node
+# programs and fail (exit 127: node/corepack not found) on this base. bun
+# reads the workspace layout from the root package.json "workspaces" field
+# and migrates the committed pnpm-lock.yaml on install.
 
-FROM oven/bun:1.1.38-slim AS base
+FROM docker.io/oven/bun:1.1.38-slim AS base
 WORKDIR /app
 
-# pnpm via corepack (pinned by the root package.json packageManager field).
+# ca-certificates so bun can fetch from the npm registry over TLS.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && corepack enable
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # ---- deps layer ---------------------------------------------------------
 FROM base AS deps
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+COPY package.json pnpm-lock.yaml tsconfig.base.json ./
 COPY packages/core/package.json packages/core/
 COPY packages/adapter-ics/package.json packages/adapter-ics/
 COPY packages/adapter-caldav/package.json packages/adapter-caldav/
 COPY packages/daemon/package.json packages/daemon/
-RUN corepack pnpm install --frozen-lockfile
+RUN bun install
 
 # ---- build layer (compile libs to dist/) --------------------------------
+# bun hoists `typescript` to the root node_modules, so the per-package
+# .bin/tsc shim is dangling. Run the hoisted tsc directly under bun against
+# each project's tsconfig (outputs are emitted relative to the tsconfig).
 FROM deps AS build
 COPY packages ./packages
-RUN corepack pnpm --filter @cango/core --filter @cango/adapter-ics \
-        --filter @cango/adapter-caldav build
+RUN for pkg in core adapter-ics adapter-caldav; do \
+        bun node_modules/typescript/bin/tsc -p packages/$pkg/tsconfig.json || exit 1; \
+    done
 
 # ---- runtime ------------------------------------------------------------
 FROM base AS runtime
