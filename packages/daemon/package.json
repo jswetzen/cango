@@ -8,6 +8,7 @@
     "dev": "bun run src/main.ts",
     "start": "bun run src/main.ts",
     "cli": "bun run src/cli.ts",
+    "validate": "bun run src/validate.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun test"
   },

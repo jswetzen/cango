@@ -199,7 +199,7 @@ function findSource(family: FamilyGraph, sourceId: string): SourceRef | undefine
  * authors reach for the PCRE-style `(?i)` / `(?im)` prefix out of habit, so we
  * lift a leading inline-flag group into real RegExp flags.
  */
-function compileRegex(pattern: string): RegExp {
+export function compileRegex(pattern: string): RegExp {
   const m = /^\(\?([a-z]+)\)/.exec(pattern);
   if (m) {
     const flags = m[1]!.replace(/[^gimsuy]/g, "");
