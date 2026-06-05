@@ -55,6 +55,16 @@ const listEventsParams = z.object({
 const explainParams = z.object({ event_id: z.string() });
 const listSeriesParams = z.object({ source_id: z.string() });
 
+const createEventParams = z
+  .object({
+    source_id: z.string(),
+    title: z.string().min(1).max(500),
+    start: isoDate,
+    end: isoDate,
+    all_day: z.boolean().default(false),
+  })
+  .refine((p) => p.end > p.start, { message: "end must be after start" });
+
 type Handler = (ctx: RpcContext, params: unknown) => unknown | Promise<unknown>;
 
 export const methods: Record<string, Handler> = {
@@ -135,6 +145,30 @@ export const methods: Record<string, Handler> = {
     });
   },
 
+  async createEvent(ctx, raw) {
+    const p = createEventParams.parse(raw);
+    const config = ctx.getConfig();
+    const conn = config.connections.find((c) => c.sourceId === p.source_id);
+    if (!conn) {
+      throw new RpcError(-32004, `unknown source: ${p.source_id}`);
+    }
+    if (conn.kind !== "caldav" || !conn.writable) {
+      throw new RpcError(-32005, `source not writable: ${p.source_id}`);
+    }
+    // The refresher owns the write + cache-refresh, using the same injected
+    // adapters as fetching so listEvents/checkAvailability see it immediately.
+    const uid = await ctx.refresher.createEvent(conn, {
+      title: p.title,
+      start: p.start,
+      end: p.end,
+      allDay: p.all_day,
+    });
+    const event = findEventById(ctx, uid);
+    return withStatus(ctx, {
+      event: event ? serializeResolved(resolveCached(ctx, event)) : { id: uid },
+    });
+  },
+
   async reloadConfig(ctx) {
     await ctx.reload();
     return withStatus(ctx, { reloaded: true });
@@ -165,7 +199,10 @@ export async function dispatch(
   if (!handler) {
     throw new RpcError(-32601, `method not found: ${method}`);
   }
-  return handler(ctx, params);
+  // `return await` (not bare `return`) so a rejection from an async handler is
+  // adopted within this frame, rather than briefly floating as an unhandled
+  // rejected promise before the caller's await attaches a handler.
+  return await handler(ctx, params);
 }
 
 function withStatus<T extends Record<string, unknown>>(ctx: RpcContext, body: T): T & {

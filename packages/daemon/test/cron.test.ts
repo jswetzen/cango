@@ -17,6 +17,7 @@ function makeConfig(): LoadedConfig {
         ownedBy: "person",
         ownerId: "p-me",
         url: "https://example.invalid/cal.ics",
+        writable: false,
       },
     ],
     attendance: [],
@@ -40,6 +41,7 @@ function stubAdapters(events: CalEvent[], opts: { fail?: boolean } = {}): Adapte
       return events;
     },
     fetchCalDav: async () => [],
+    createCalDav: async () => "stub-uid",
   };
 }
 

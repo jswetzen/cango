@@ -30,6 +30,7 @@ describe("expandConnectionEnv", () => {
       serverUrl: "https://x/",
       username: "u",
       password: "${CANGO_T_PW}",
+      writable: false,
     });
     expect(missing).toEqual([]);
     expect(connection.kind === "caldav" && connection.password).toBe("hunter2");

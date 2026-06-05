@@ -24,6 +24,8 @@ const sourceSchema = z
     username: z.string().optional(),
     password: z.string().optional(),
     calendarName: z.string().optional(),
+    // Opt-in write access. Only caldav can be writable; default read-only.
+    writable: z.boolean().default(false),
   })
   .superRefine((s, ctx) => {
     if (s.kind === "ics" && !s.url) {
@@ -33,6 +35,12 @@ const sourceSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `caldav source ${s.id} needs serverUrl, username, password`,
+      });
+    }
+    if (s.kind === "ics" && s.writable) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `ics source ${s.id} cannot be writable`,
       });
     }
   });
@@ -221,6 +229,8 @@ export interface CalDavConnection {
   password: string;
   calendarName?: string;
   selfEmail?: string;
+  /** Whether the daemon may write events to this source (opt-in). */
+  writable: boolean;
 }
 
 export type SourceConnection = IcsConnection | CalDavConnection;
@@ -379,6 +389,7 @@ export function buildFamily(file: FamilyFile): {
           serverUrl: s.serverUrl!,
           username: s.username!,
           password: s.password!,
+          writable: s.writable,
           ...(s.calendarName !== undefined ? { calendarName: s.calendarName } : {}),
           ...(s.selfEmail !== undefined ? { selfEmail: s.selfEmail } : {}),
         },

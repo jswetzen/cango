@@ -29,6 +29,7 @@ function fakeClient(
   return {
     fetchCalendars: async () => calendars,
     fetchCalendarObjects,
+    createCalendarObject: async () => ({}),
   };
 }
 

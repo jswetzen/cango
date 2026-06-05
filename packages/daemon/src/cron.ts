@@ -1,6 +1,13 @@
 import type { Cache } from "./cache.ts";
 import type { LoadedConfig, SourceConnection } from "./config.ts";
-import { type Adapters, fetchSource, realAdapters, refreshWindow } from "./sources.ts";
+import {
+  type Adapters,
+  type CreateEventInput,
+  createInSource,
+  fetchSource,
+  realAdapters,
+  refreshWindow,
+} from "./sources.ts";
 
 export interface RefresherOptions {
   adapters?: Adapters;
@@ -86,6 +93,22 @@ export class Refresher {
       this.log(`refresh failed: ${connection.sourceId}: ${message}`);
       throw err;
     }
+  }
+
+  /**
+   * Write a new event to a source, then refresh that source so the cache
+   * reflects it. Uses the same injected adapters as fetching, which keeps the
+   * write path testable without a live CalDAV server.
+   */
+  async createEvent(connection: SourceConnection, input: CreateEventInput): Promise<string> {
+    const uid = await createInSource(
+      connection,
+      input,
+      this.config.personIdForSource,
+      this.adapters,
+    );
+    await this.refreshOnce(connection);
+    return uid;
   }
 
   private async runAndSchedule(connection: SourceConnection): Promise<void> {

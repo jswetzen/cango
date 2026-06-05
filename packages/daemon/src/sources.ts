@@ -1,7 +1,13 @@
 import type { CalEvent } from "@cango/core";
 import { fetchEvents as fetchIcs } from "@cango/adapter-ics";
-import { fetchEvents as fetchCalDav } from "@cango/adapter-caldav";
+import {
+  fetchEvents as fetchCalDav,
+  createEvent as createCalDav,
+  type CreateEventInput,
+} from "@cango/adapter-caldav";
 import type { SourceConnection } from "./config.ts";
+
+export type { CreateEventInput };
 
 export interface FetchWindow {
   start: Date;
@@ -12,11 +18,13 @@ export interface FetchWindow {
 export interface Adapters {
   fetchIcs: typeof fetchIcs;
   fetchCalDav: typeof fetchCalDav;
+  createCalDav: typeof createCalDav;
 }
 
 export const realAdapters: Adapters = {
   fetchIcs,
   fetchCalDav,
+  createCalDav,
 };
 
 export async function fetchSource(
@@ -49,6 +57,37 @@ export async function fetchSource(
         : {}),
     },
     window,
+  );
+}
+
+/**
+ * Create an event on a writable source. Only CalDAV sources can be written
+ * today; ICS feeds are read-only by nature. Returns the new event's UID, which
+ * matches the `id` it will carry once refetched. Writability (the `writable`
+ * opt-in) is enforced by the RPC layer before this is called.
+ */
+export async function createInSource(
+  connection: SourceConnection,
+  input: CreateEventInput,
+  personIdForSource: (sourceId: string) => string,
+  adapters: Adapters = realAdapters,
+): Promise<string> {
+  if (connection.kind !== "caldav") {
+    throw new Error(`source kind '${connection.kind}' is not writable`);
+  }
+  return adapters.createCalDav(
+    {
+      sourceId: connection.sourceId,
+      serverUrl: connection.serverUrl,
+      username: connection.username,
+      password: connection.password,
+      resolvePersonId: personIdForSource,
+      ...(connection.selfEmail !== undefined ? { selfEmail: connection.selfEmail } : {}),
+      ...(connection.calendarName !== undefined
+        ? { calendarFilter: (c) => c.displayName === connection.calendarName }
+        : {}),
+    },
+    input,
   );
 }
 
