@@ -9,3 +9,10 @@ coverage/
 # Local design/planning docs — not for the public/shared repo
 PLAN.md
 ok-design-the-calendar-vivid-honey.md
+
+# Local end-to-end run: creds + ephemeral artifacts
+.env
+.env.local
+/cango*.sock
+*.db
+/.cango/
