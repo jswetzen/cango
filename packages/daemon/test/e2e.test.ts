@@ -179,9 +179,10 @@ describe("daemon e2e over the socket", () => {
       between: { start: "2026-06-01T09:00:00Z", end: "2026-06-01T12:00:00Z" },
       people: ["p-me"],
     })) as { slots: Array<{ start: string; end: string }> };
+    // No timezone configured -> default UTC, formatted to second resolution.
     expect(res.slots).toEqual([
-      { start: "2026-06-01T09:00:00.000Z", end: "2026-06-01T10:00:00.000Z" },
-      { start: "2026-06-01T11:00:00.000Z", end: "2026-06-01T12:00:00.000Z" },
+      { start: "2026-06-01T09:00:00Z", end: "2026-06-01T10:00:00Z" },
+      { start: "2026-06-01T11:00:00Z", end: "2026-06-01T12:00:00Z" },
     ]);
   });
 

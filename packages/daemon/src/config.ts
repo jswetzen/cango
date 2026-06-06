@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { compileRegex, type FamilyGraph, type Role, type Rule } from "@cango/core";
+import { isValidTimeZone } from "./tz.ts";
 
 const roleSchema = z.enum(["hard", "soft", "info", "conditional"]);
 const rsvpSchema = z.enum(["accepted", "tentative", "declined", "needsAction"]);
@@ -77,8 +78,14 @@ export const familyFileSchema = z.object({
     .object({
       refreshIntervalMinutes: z.number().int().positive().default(60),
       maxStaleHours: z.number().positive().default(6),
+      // IANA zone used to format event times in output and to interpret
+      // offset-less input timestamps. Defaults to UTC for back-compat.
+      timezone: z
+        .string()
+        .default("UTC")
+        .refine(isValidTimeZone, { message: "unknown IANA timezone" }),
     })
-    .default({ refreshIntervalMinutes: 60, maxStaleHours: 6 }),
+    .default({ refreshIntervalMinutes: 60, maxStaleHours: 6, timezone: "UTC" }),
 });
 
 const ruleSchema = z.object({
@@ -243,6 +250,7 @@ export type SourceConnection = IcsConnection | CalDavConnection;
 export interface DaemonSettings {
   refreshIntervalMinutes: number;
   maxStaleHours: number;
+  timezone: string;
 }
 
 export interface LoadedConfig {

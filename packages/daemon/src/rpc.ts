@@ -10,6 +10,7 @@ import { z } from "zod";
 import type { Cache } from "./cache.ts";
 import type { LoadedConfig } from "./config.ts";
 import type { Refresher } from "./cron.ts";
+import { formatInZone, parseInZone } from "./tz.ts";
 
 export interface RpcContext {
   cache: Cache;
@@ -28,49 +29,58 @@ export class RpcError extends Error {
   }
 }
 
-const isoDate = z
-  .string()
-  .refine((s) => !Number.isNaN(Date.parse(s)), { message: "invalid ISO date" })
-  .transform((s) => new Date(s));
+// Date params are built per-request because parsing an offset-less timestamp
+// depends on the configured timezone (see parseInZone). Each is a factory taking
+// the resolved tz; date-free param schemas stay static.
+const isoDate = (tz: string) =>
+  z
+    .string()
+    .refine((s) => !Number.isNaN(Date.parse(s)), { message: "invalid ISO date" })
+    .transform((s) => parseInZone(s, tz));
 
-const checkParams = z.object({
-  start: isoDate,
-  end: isoDate,
-  people: z.array(z.string()).optional(),
-});
+const checkParams = (tz: string) =>
+  z.object({
+    start: isoDate(tz),
+    end: isoDate(tz),
+    people: z.array(z.string()).optional(),
+  });
 
-const freeSlotParams = z.object({
-  duration_minutes: z.number().int().positive(),
-  between: z.object({ start: isoDate, end: isoDate }),
-  people: z.array(z.string()).optional(),
-  working_hours: z.object({ start: z.string(), end: z.string() }).optional(),
-});
+const freeSlotParams = (tz: string) =>
+  z.object({
+    duration_minutes: z.number().int().positive(),
+    between: z.object({ start: isoDate(tz), end: isoDate(tz) }),
+    people: z.array(z.string()).optional(),
+    working_hours: z.object({ start: z.string(), end: z.string() }).optional(),
+  });
 
-const listEventsParams = z.object({
-  start: isoDate,
-  end: isoDate,
-  people: z.array(z.string()).optional(),
-});
+const listEventsParams = (tz: string) =>
+  z.object({
+    start: isoDate(tz),
+    end: isoDate(tz),
+    people: z.array(z.string()).optional(),
+  });
 
 const explainParams = z.object({ event_id: z.string() });
 const listSeriesParams = z.object({ source_id: z.string() });
 
-const createEventParams = z
-  .object({
-    source_id: z.string(),
-    title: z.string().min(1).max(500),
-    start: isoDate,
-    end: isoDate,
-    all_day: z.boolean().default(false),
-  })
-  .refine((p) => p.end > p.start, { message: "end must be after start" });
+const createEventParams = (tz: string) =>
+  z
+    .object({
+      source_id: z.string(),
+      title: z.string().min(1).max(500),
+      start: isoDate(tz),
+      end: isoDate(tz),
+      all_day: z.boolean().default(false),
+    })
+    .refine((p) => p.end > p.start, { message: "end must be after start" });
 
 type Handler = (ctx: RpcContext, params: unknown) => unknown | Promise<unknown>;
 
 export const methods: Record<string, Handler> = {
   checkAvailability(ctx, raw) {
-    const p = checkParams.parse(raw);
     const config = ctx.getConfig();
+    const tz = config.settings.timezone;
+    const p = checkParams(tz).parse(raw);
     const people = selectPeople(config, p.people);
     const events = ctx.cache.eventsInWindow(p.start, p.end, p.people);
     const result = checkAvailability({
@@ -84,15 +94,16 @@ export const methods: Record<string, Handler> = {
       verdict: result.verdict,
       conflicts: result.conflicts.map((c) => ({
         person: { id: c.person.id, name: c.person.name },
-        event: serializeResolved(c.event),
+        event: serializeResolved(c.event, tz),
         overlap_minutes: c.overlapMinutes,
       })),
     });
   },
 
   findFreeSlot(ctx, raw) {
-    const p = freeSlotParams.parse(raw);
     const config = ctx.getConfig();
+    const tz = config.settings.timezone;
+    const p = freeSlotParams(tz).parse(raw);
     const people = selectPeople(config, p.people);
     const events = ctx.cache.eventsInWindow(p.between.start, p.between.end, p.people);
     const slots = findFreeSlots({
@@ -105,49 +116,53 @@ export const methods: Record<string, Handler> = {
       ...(p.working_hours ? { workingHours: p.working_hours } : {}),
     });
     return withStatus(ctx, {
-      slots: slots.map((s) => ({ start: s.start.toISOString(), end: s.end.toISOString() })),
+      slots: slots.map((s) => ({ start: formatInZone(s.start, tz), end: formatInZone(s.end, tz) })),
     });
   },
 
   listEvents(ctx, raw) {
-    const p = listEventsParams.parse(raw);
     const config = ctx.getConfig();
+    const tz = config.settings.timezone;
+    const p = listEventsParams(tz).parse(raw);
     const events = ctx.cache.eventsInWindow(p.start, p.end, p.people);
     return withStatus(ctx, {
-      events: events.map((e) => serializeResolved(resolveCached(ctx, e))),
+      events: events.map((e) => serializeResolved(resolveCached(ctx, e), tz)),
     });
   },
 
   explainEvent(ctx, raw) {
     const p = explainParams.parse(raw);
     const config = ctx.getConfig();
+    const tz = config.settings.timezone;
     const event = findEventById(ctx, p.event_id);
     if (!event) {
       throw new RpcError(-32004, `event not found: ${p.event_id}`);
     }
     const result = explainEvent(event, config.family, config.rules);
     return withStatus(ctx, {
-      resolved: serializeResolved(result.resolved),
+      resolved: serializeResolved(result.resolved, tz),
       trace: result.trace,
     });
   },
 
   listSeries(ctx, raw) {
+    const tz = ctx.getConfig().settings.timezone;
     const p = listSeriesParams.parse(raw);
     const series = ctx.cache.recentSeries(p.source_id);
     return withStatus(ctx, {
       series: series.map((s) => ({
         series_id: s.seriesId,
         title: s.title,
-        last_start: new Date(s.lastStartMs).toISOString(),
+        last_start: formatInZone(new Date(s.lastStartMs), tz),
         count: s.count,
       })),
     });
   },
 
   async createEvent(ctx, raw) {
-    const p = createEventParams.parse(raw);
     const config = ctx.getConfig();
+    const tz = config.settings.timezone;
+    const p = createEventParams(tz).parse(raw);
     const conn = config.connections.find((c) => c.sourceId === p.source_id);
     if (!conn) {
       throw new RpcError(-32004, `unknown source: ${p.source_id}`);
@@ -165,7 +180,7 @@ export const methods: Record<string, Handler> = {
     });
     const event = findEventById(ctx, uid);
     return withStatus(ctx, {
-      event: event ? serializeResolved(resolveCached(ctx, event)) : { id: uid },
+      event: event ? serializeResolved(resolveCached(ctx, event), tz) : { id: uid },
     });
   },
 
@@ -175,10 +190,11 @@ export const methods: Record<string, Handler> = {
   },
 
   health(ctx) {
+    const tz = ctx.getConfig().settings.timezone;
     const statuses = ctx.cache.sourceStatuses();
     const freshness: Record<string, string | null> = {};
     for (const s of statuses) {
-      freshness[s.id] = s.lastSuccessAt ? new Date(s.lastSuccessAt).toISOString() : null;
+      freshness[s.id] = s.lastSuccessAt ? formatInZone(new Date(s.lastSuccessAt), tz) : null;
     }
     const stale = ctx.refresher.staleSources();
     return {
@@ -242,15 +258,15 @@ function findEventById(ctx: RpcContext, eventId: string): CalEvent | null {
   return events.find((e) => e.id === eventId) ?? null;
 }
 
-function serializeResolved(e: ResolvedEvent) {
+function serializeResolved(e: ResolvedEvent, tz: string) {
   return {
     id: e.id,
     source_id: e.sourceId,
     person_id: e.personId,
     series_id: e.seriesId ?? null,
     title: e.title,
-    start: e.start.toISOString(),
-    end: e.end.toISOString(),
+    start: formatInZone(e.start, tz),
+    end: formatInZone(e.end, tz),
     all_day: e.allDay,
     resolved_role: e.resolvedRole,
     resolved_by: e.resolvedBy,

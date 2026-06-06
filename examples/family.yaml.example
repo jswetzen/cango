@@ -10,6 +10,8 @@
 settings:
   refreshIntervalMinutes: 60
   maxStaleHours: 6
+  # IANA timezone for formatting event times and reading offset-less inputs.
+  timezone: Europe/Stockholm
 
 people:
   - id: p-me

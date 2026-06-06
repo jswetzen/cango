@@ -21,7 +21,7 @@ function makeConfig(): LoadedConfig {
       },
     ],
     attendance: [],
-    settings: { refreshIntervalMinutes: 60, maxStaleHours: 6 },
+    settings: { refreshIntervalMinutes: 60, maxStaleHours: 6, timezone: "UTC" },
   });
   return {
     family,
