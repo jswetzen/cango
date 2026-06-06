@@ -35,6 +35,22 @@ describe("expandConnectionEnv", () => {
     expect(missing).toEqual([]);
     expect(connection.kind === "caldav" && connection.password).toBe("hunter2");
   });
+
+  test("expands and preserves an explicit calendarUrl", () => {
+    process.env.CANGO_T_PW = "hunter2";
+    const { connection } = expandConnectionEnv({
+      kind: "caldav",
+      sourceId: "s",
+      serverUrl: "https://x/remote.php/dav/",
+      username: "u",
+      password: "${CANGO_T_PW}",
+      calendarUrl: "https://x/remote.php/dav/calendars/u/personal/",
+      writable: true,
+    });
+    expect(connection.kind === "caldav" && connection.calendarUrl).toBe(
+      "https://x/remote.php/dav/calendars/u/personal/",
+    );
+  });
 });
 
 describe("YamlFamilySource env expansion", () => {

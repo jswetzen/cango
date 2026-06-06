@@ -44,20 +44,27 @@ export async function fetchSource(
       window,
     );
   }
-  return adapters.fetchCalDav(
-    {
-      sourceId: connection.sourceId,
-      serverUrl: connection.serverUrl,
-      username: connection.username,
-      password: connection.password,
-      resolvePersonId: personIdForSource,
-      ...(connection.selfEmail !== undefined ? { selfEmail: connection.selfEmail } : {}),
-      ...(connection.calendarName !== undefined
-        ? { calendarFilter: (c) => c.displayName === connection.calendarName }
-        : {}),
-    },
-    window,
-  );
+  return adapters.fetchCalDav(caldavConfig(connection, personIdForSource), window);
+}
+
+/** Build the adapter config shared by the read and write paths. */
+function caldavConfig(
+  connection: Extract<SourceConnection, { kind: "caldav" }>,
+  personIdForSource: (sourceId: string) => string,
+) {
+  return {
+    sourceId: connection.sourceId,
+    serverUrl: connection.serverUrl,
+    username: connection.username,
+    password: connection.password,
+    resolvePersonId: personIdForSource,
+    ...(connection.selfEmail !== undefined ? { selfEmail: connection.selfEmail } : {}),
+    ...(connection.calendarUrl !== undefined ? { calendarUrl: connection.calendarUrl } : {}),
+    // calendarName is ignored when an explicit calendarUrl pins the collection.
+    ...(connection.calendarName !== undefined && connection.calendarUrl === undefined
+      ? { calendarFilter: (c: { displayName?: string }) => c.displayName === connection.calendarName }
+      : {}),
+  };
 }
 
 /**
@@ -75,20 +82,7 @@ export async function createInSource(
   if (connection.kind !== "caldav") {
     throw new Error(`source kind '${connection.kind}' is not writable`);
   }
-  return adapters.createCalDav(
-    {
-      sourceId: connection.sourceId,
-      serverUrl: connection.serverUrl,
-      username: connection.username,
-      password: connection.password,
-      resolvePersonId: personIdForSource,
-      ...(connection.selfEmail !== undefined ? { selfEmail: connection.selfEmail } : {}),
-      ...(connection.calendarName !== undefined
-        ? { calendarFilter: (c) => c.displayName === connection.calendarName }
-        : {}),
-    },
-    input,
-  );
+  return adapters.createCalDav(caldavConfig(connection, personIdForSource), input);
 }
 
 /** Window the daemon keeps warm: a small look-back plus a forward horizon. */

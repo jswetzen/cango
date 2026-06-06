@@ -39,6 +39,11 @@ sources:
     password: ${CANGO_WORK_PASSWORD}   # daemon expands from /etc/cango.env
     calendarName: Work
     selfEmail: me@example.com
+    # Optional: pin the exact calendar-collection URL (as DAVx5 or the server's
+    # web UI report it). When set, the adapter talks straight to it and skips
+    # CalDAV auto-discovery — use this if your server's /.well-known/caldav is
+    # broken, or to avoid relying on calendarName matching.
+    # calendarUrl: https://caldav.example.com/remote.php/dav/calendars/me/work/
     # Opt-in: allow the daemon to CREATE events on this calendar via the
     # create_event tool. Default false. Only valid for caldav sources —
     # setting it on an ics source is a config error.

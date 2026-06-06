@@ -24,6 +24,9 @@ const sourceSchema = z
     username: z.string().optional(),
     password: z.string().optional(),
     calendarName: z.string().optional(),
+    // Exact calendar-collection URL; when set the adapter skips tsdav discovery
+    // and talks straight to it (for servers with broken .well-known/principal).
+    calendarUrl: z.string().optional(),
     // Opt-in write access. Only caldav can be writable; default read-only.
     writable: z.boolean().default(false),
   })
@@ -228,6 +231,8 @@ export interface CalDavConnection {
   username: string;
   password: string;
   calendarName?: string;
+  /** Exact calendar-collection URL; bypasses tsdav discovery when set. */
+  calendarUrl?: string;
   selfEmail?: string;
   /** Whether the daemon may write events to this source (opt-in). */
   writable: boolean;
@@ -303,6 +308,7 @@ export function expandConnectionEnv(conn: SourceConnection): {
       username: ex(conn.username),
       password: ex(conn.password),
       ...(conn.calendarName !== undefined ? { calendarName: ex(conn.calendarName) } : {}),
+      ...(conn.calendarUrl !== undefined ? { calendarUrl: ex(conn.calendarUrl) } : {}),
       ...(conn.selfEmail !== undefined ? { selfEmail: ex(conn.selfEmail) } : {}),
     },
     missing,
@@ -391,6 +397,7 @@ export function buildFamily(file: FamilyFile): {
           password: s.password!,
           writable: s.writable,
           ...(s.calendarName !== undefined ? { calendarName: s.calendarName } : {}),
+          ...(s.calendarUrl !== undefined ? { calendarUrl: s.calendarUrl } : {}),
           ...(s.selfEmail !== undefined ? { selfEmail: s.selfEmail } : {}),
         },
   );

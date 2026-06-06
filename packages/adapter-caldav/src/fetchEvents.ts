@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { CalEvent } from "@cango/core";
 import { parseIcs } from "@cango/adapter-ics";
-import { createDAVClient } from "tsdav";
+import {
+  createDAVClient,
+  getBasicAuthHeaders,
+  createCalendarObject as davCreateCalendarObject,
+  fetchCalendarObjects as davFetchCalendarObjects,
+} from "tsdav";
 
 export interface CalDavSourceConfig {
   sourceId: string;
@@ -11,6 +16,14 @@ export interface CalDavSourceConfig {
   resolvePersonId: (sourceId: string) => string;
   selfEmail?: string;
   calendarFilter?: (calendar: CalDavCalendarLike) => boolean;
+  /**
+   * Exact calendar-collection URL (as DAVx5 / the server's web UI report it).
+   * When set, the adapter talks straight to this collection and skips tsdav's
+   * account discovery (.well-known + principal lookup) — needed for servers
+   * whose discovery is broken (e.g. an owncloud whose /.well-known/caldav
+   * redirects to an unreachable host). `calendarFilter` is ignored in this mode.
+   */
+  calendarUrl?: string;
 }
 
 export interface CalDavCalendarLike {
@@ -59,7 +72,7 @@ export async function fetchEvents(
     throw new Error("fetchEvents: window.end must be after window.start");
   }
 
-  const client = options.client ?? (await defaultClient(config));
+  const client = options.client ?? (await clientFor(config));
   const calendars = await client.fetchCalendars();
   const selected = config.calendarFilter
     ? calendars.filter(config.calendarFilter)
@@ -111,7 +124,7 @@ export async function createEvent(
     throw new Error("createEvent: end must be after start");
   }
 
-  const client = options.client ?? (await defaultClient(config));
+  const client = options.client ?? (await clientFor(config));
   const calendars = await client.fetchCalendars();
   const selected = config.calendarFilter
     ? calendars.filter(config.calendarFilter)
@@ -201,6 +214,55 @@ function formatUtc(d: Date): string {
 
 function formatDate(d: Date): string {
   return formatUtc(d).slice(0, 8);
+}
+
+/** Pick the discovery-based client or the direct (explicit-URL) one. */
+function clientFor(config: CalDavSourceConfig): Promise<CalDavClientLike> {
+  return config.calendarUrl
+    ? Promise.resolve(directClient(config))
+    : defaultClient(config);
+}
+
+/**
+ * Talk directly to a known calendar-collection URL, skipping tsdav's account
+ * discovery. Uses the standalone tsdav verbs with a Basic-auth header, so there
+ * is no /.well-known or principal lookup — the exact collection URL is the only
+ * input. The synthetic single "calendar" it reports is that collection.
+ */
+function directClient(config: CalDavSourceConfig): CalDavClientLike {
+  const url = config.calendarUrl;
+  if (!url) throw new Error("directClient: calendarUrl is required");
+  const headers = getBasicAuthHeaders({
+    username: config.username,
+    password: config.password,
+  });
+  type DavCalArg = Parameters<typeof davCreateCalendarObject>[0]["calendar"];
+  return {
+    fetchCalendars: async () => [{ url }],
+    fetchCalendarObjects: async ({ calendar, timeRange }) => {
+      const objects = await davFetchCalendarObjects({
+        calendar: { url: calendar.url } as DavCalArg,
+        timeRange,
+        headers,
+      });
+      return objects.map((o) => ({
+        url: o.url,
+        ...(typeof o.data === "string" ? { data: o.data } : {}),
+      }));
+    },
+    createCalendarObject: async ({ calendar, iCalString, filename }) => {
+      const res = await davCreateCalendarObject({
+        calendar: { url: calendar.url } as DavCalArg,
+        iCalString,
+        filename,
+        headers,
+      });
+      if (!res.ok) {
+        throw new Error(`CalDAV createCalendarObject failed: ${res.status} ${res.statusText}`);
+      }
+      return { url: res.url };
+    },
+  };
 }
 
 async function defaultClient(config: CalDavSourceConfig): Promise<CalDavClientLike> {
