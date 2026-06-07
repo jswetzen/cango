@@ -6,6 +6,9 @@ coverage/
 .turbo/
 .pnpm-store/
 
+# Local Claude Code state — never commit to the shared repo
+.claude/
+
 # Local design/planning docs — not for the public/shared repo
 PLAN.md
 ok-design-the-calendar-vivid-honey.md
