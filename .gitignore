@@ -16,3 +16,8 @@ ok-design-the-calendar-vivid-honey.md
 /cango*.sock
 *.db
 /.cango/
+
+# Local runtime config — family.yaml holds CalDAV creds; never commit it.
+# (Deployed copies are rendered from mikro-iac's secrets.auto.tfvars.)
+/family.yaml
+/rules.yaml
