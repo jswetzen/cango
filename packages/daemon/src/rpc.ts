@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { Cache } from "./cache.ts";
 import type { LoadedConfig } from "./config.ts";
 import type { Refresher } from "./cron.ts";
-import { formatInZone, parseInZone } from "./tz.ts";
+import { formatInZone, parseInZone, zonedDayIndex } from "./tz.ts";
 
 export interface RpcContext {
   cache: Cache;
@@ -53,11 +53,23 @@ const freeSlotParams = (tz: string) =>
     working_hours: z.object({ start: z.string(), end: z.string() }).optional(),
   });
 
+// Mirrors the core `Role` union (no zod schema is exported from @cango/core).
+const roleEnum = z.enum(["hard", "soft", "info", "conditional"]);
+
 const listEventsParams = (tz: string) =>
   z.object({
     start: isoDate(tz),
     end: isoDate(tz),
     people: z.array(z.string()).optional(),
+    // Compact by default: the Exchange GUIDs (`id`/`series_id`) are large and
+    // only needed for follow-up calls, so they're opt-in via `extended`.
+    extended: z.boolean().default(false),
+    // Opt-in role filter. Default drops nothing so a soft-only event is never
+    // silently hidden from a caller eyeballing a day.
+    exclude_roles: z.array(roleEnum).optional(),
+    // High default so a full-month fetch stays a single call.
+    limit: z.number().int().positive().default(1000),
+    offset: z.number().int().nonnegative().default(0),
   });
 
 const explainParams = z.object({ event_id: z.string() });
@@ -125,8 +137,19 @@ export const methods: Record<string, Handler> = {
     const tz = config.settings.timezone;
     const p = listEventsParams(tz).parse(raw);
     const events = ctx.cache.eventsInWindow(p.start, p.end, p.people);
+    const exclude = p.exclude_roles ? new Set(p.exclude_roles) : null;
+    const resolved = events
+      .map((e) => resolveCached(ctx, e))
+      .filter((r) => !exclude || !exclude.has(r.resolvedRole));
+    const total = resolved.length;
+    const page = resolved.slice(p.offset, p.offset + p.limit);
     return withStatus(ctx, {
-      events: events.map((e) => serializeResolved(resolveCached(ctx, e), tz)),
+      events: page.map((r) =>
+        serializeResolved(r, tz, { extended: p.extended, daySpan: true }),
+      ),
+      total,
+      returned: page.length,
+      truncated: p.offset + page.length < total,
     });
   },
 
@@ -258,19 +281,39 @@ function findEventById(ctx: RpcContext, eventId: string): CalEvent | null {
   return events.find((e) => e.id === eventId) ?? null;
 }
 
-function serializeResolved(e: ResolvedEvent, tz: string) {
+/** Distinct tz-local calendar days an event touches; 1 for a same-day event. */
+function eventDaySpan(e: ResolvedEvent, tz: string): number {
+  // All-day events store an exclusive end (8 00:00 → 9 00:00 = one day), so
+  // step back an instant before taking its date.
+  const endRef = e.allDay ? new Date(e.end.getTime() - 1) : e.end;
+  return Math.max(1, zonedDayIndex(endRef, tz) - zonedDayIndex(e.start, tz) + 1);
+}
+
+// `extended` defaults true and `daySpan` false so callers other than listEvents
+// (checkAvailability/explainEvent/createEvent) get byte-identical output.
+function serializeResolved(
+  e: ResolvedEvent,
+  tz: string,
+  opts: { extended?: boolean; daySpan?: boolean } = {},
+) {
+  const { extended = true, daySpan = false } = opts;
+  const span = daySpan ? eventDaySpan(e, tz) : 1;
   return {
-    id: e.id,
+    ...(extended ? { id: e.id } : {}),
     source_id: e.sourceId,
     person_id: e.personId,
-    series_id: e.seriesId ?? null,
+    ...(extended ? { series_id: e.seriesId ?? null } : {}),
     title: e.title,
     start: formatInZone(e.start, tz),
     end: formatInZone(e.end, tz),
     all_day: e.allDay,
     resolved_role: e.resolvedRole,
-    resolved_by: e.resolvedBy,
-    resolved_reason: e.resolvedReason,
+    // In compact mode a plain source-default verdict carries no information, so
+    // drop its boilerplate; keep it whenever a rule/attendance/etc. decided it.
+    ...(!extended && e.resolvedBy === "default"
+      ? {}
+      : { resolved_by: e.resolvedBy, resolved_reason: e.resolvedReason }),
+    ...(span > 1 ? { day_span: span } : {}),
     ...(e.ruleId !== undefined ? { rule_id: e.ruleId } : {}),
     ...(e.attendanceEdgeId !== undefined ? { attendance_edge_id: e.attendanceEdgeId } : {}),
     ...(e.rsvpStatus !== undefined ? { rsvp_status: e.rsvpStatus } : {}),

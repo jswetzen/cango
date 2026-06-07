@@ -100,6 +100,8 @@ describe("daemon e2e over the socket", () => {
     cache.replaceSourceEvents("src-work", [
       event({ id: "w1", title: "Sprint review" }),
       event({ id: "w2", title: "Standup", start: new Date("2026-06-01T14:00:00Z"), end: new Date("2026-06-01T14:15:00Z") }),
+      // Multi-day, mid-month so it stays out of the 1 June window other tests use.
+      event({ id: "w3", title: "Conference", start: new Date("2026-06-12T18:00:00Z"), end: new Date("2026-06-14T19:00:00Z") }),
     ]);
     cache.replaceSourceEvents("src-club", [
       event({
@@ -203,14 +205,98 @@ describe("daemon e2e over the socket", () => {
     expect(res.series.some((s) => s.series_id === "club-training")).toBe(true);
   });
 
-  test("listEvents returns resolved roles", async () => {
+  test("listEvents returns resolved roles (extended exposes ids)", async () => {
     const res = (await rpcCall(socketPath, "listEvents", {
       start: "2026-06-01T00:00:00Z",
       end: "2026-06-02T00:00:00Z",
       people: ["p-me"],
+      extended: true,
     })) as { events: Array<{ id: string; resolved_role: string }> };
     const ids = res.events.map((e) => e.id).sort();
     expect(ids).toEqual(["w1", "w2"]);
+  });
+
+  test("listEvents is compact by default: no ids, default verdicts trimmed", async () => {
+    const res = (await rpcCall(socketPath, "listEvents", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-02T00:00:00Z",
+      people: ["p-me"],
+    })) as {
+      events: Array<{
+        id?: string;
+        series_id?: string;
+        title: string;
+        resolved_role: string;
+        resolved_by?: string;
+      }>;
+      total: number;
+      returned: number;
+      truncated: boolean;
+    };
+    expect(res.total).toBe(2);
+    expect(res.returned).toBe(2);
+    expect(res.truncated).toBe(false);
+    for (const e of res.events) {
+      expect(e.id).toBeUndefined();
+      expect(e.series_id).toBeUndefined();
+    }
+    const sprint = res.events.find((e) => e.title === "Sprint review");
+    const standup = res.events.find((e) => e.title === "Standup");
+    // Plain source-default verdict: boilerplate dropped.
+    expect(sprint?.resolved_by).toBeUndefined();
+    // Rule-decided verdict: kept even in compact mode.
+    expect(standup?.resolved_by).toBe("rule");
+  });
+
+  test("listEvents flags multi-day events with day_span", async () => {
+    const res = (await rpcCall(socketPath, "listEvents", {
+      start: "2026-06-12T00:00:00Z",
+      end: "2026-06-15T00:00:00Z",
+      people: ["p-me"],
+    })) as { events: Array<{ title: string; day_span?: number }> };
+    const conf = res.events.find((e) => e.title === "Conference");
+    expect(conf?.day_span).toBe(3); // Fri→Sun
+    // Same-day events carry no day_span.
+    const sameDay = (await rpcCall(socketPath, "listEvents", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-02T00:00:00Z",
+      people: ["p-me"],
+    })) as { events: Array<{ day_span?: number }> };
+    expect(sameDay.events.every((e) => e.day_span === undefined)).toBe(true);
+  });
+
+  test("listEvents exclude_roles drops matching events", async () => {
+    const res = (await rpcCall(socketPath, "listEvents", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-02T00:00:00Z",
+      people: ["p-me"],
+      exclude_roles: ["soft"],
+    })) as { events: Array<{ title: string }>; total: number };
+    expect(res.total).toBe(1);
+    expect(res.events.map((e) => e.title)).toEqual(["Sprint review"]);
+  });
+
+  test("listEvents paginates with limit/offset", async () => {
+    const page1 = (await rpcCall(socketPath, "listEvents", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-02T00:00:00Z",
+      people: ["p-me"],
+      limit: 1,
+    })) as { events: Array<{ title: string }>; total: number; returned: number; truncated: boolean };
+    expect(page1.total).toBe(2);
+    expect(page1.returned).toBe(1);
+    expect(page1.truncated).toBe(true);
+    expect(page1.events[0]?.title).toBe("Sprint review"); // earliest start
+
+    const page2 = (await rpcCall(socketPath, "listEvents", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-02T00:00:00Z",
+      people: ["p-me"],
+      limit: 1,
+      offset: 1,
+    })) as { events: Array<{ title: string }>; truncated: boolean };
+    expect(page2.events[0]?.title).toBe("Standup");
+    expect(page2.truncated).toBe(false);
   });
 
   test("reloadConfig hot-swaps rules and changes the verdict", async () => {

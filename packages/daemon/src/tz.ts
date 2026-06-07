@@ -83,6 +83,19 @@ export function formatInZone(date: Date, tz: string): string {
   return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${offset}`;
 }
 
+/**
+ * Integer count of days from the Unix epoch to the wall-clock *date* of `date`
+ * as seen in `tz`. Two instants on the same local calendar day share an index,
+ * so `b - a` is the number of day boundaries between them — the basis for an
+ * event's day span.
+ */
+export function zonedDayIndex(date: Date, tz: string): number {
+  const p = zonedParts(date, tz);
+  return Math.floor(
+    Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day)) / 86_400_000,
+  );
+}
+
 // Explicit offset/Z already present on the time portion (e.g. `...T13:00:00Z` or
 // `...+02:00`); such inputs are unambiguous and parsed as-is.
 const HAS_OFFSET = /([Zz]|[+-]\d{2}:?\d{2})$/;
