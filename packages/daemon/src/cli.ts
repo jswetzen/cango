@@ -15,7 +15,8 @@ async function run(): Promise<void> {
     console.error(
       "usage: cango-cli <method> [jsonParams]\n" +
         "methods: checkAvailability, findFreeSlot, listEvents, explainEvent, " +
-        "listSeries, reloadConfig, health",
+        "listSeries, createEvent, listRules, createRule, amendRule, retractRule, " +
+        "reloadConfig, health",
     );
     process.exit(2);
   }

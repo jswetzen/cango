@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resolveRole } from "../src/resolveRole.js";
 import type { Role } from "../src/types.js";
-import { event, makeFamily, rule } from "./fixtures.js";
+import { attendanceRule, event, makeFamily, rule } from "./fixtures.js";
 
 interface Case {
   name: string;
@@ -9,7 +9,7 @@ interface Case {
   family?: Parameters<typeof resolveRole>[1];
   rules?: Parameters<typeof resolveRole>[2];
   expectRole: Role;
-  expectBy: "default" | "structural" | "attendance" | "rule";
+  expectBy: "default" | "structural" | "rule";
 }
 
 const cases: Case[] = [
@@ -52,38 +52,30 @@ const cases: Case[] = [
     expectBy: "default",
   },
   {
-    name: "attendance — NEVER_ATTENDS yields info",
+    name: "attendance rule — NEVER_ATTENDS (info) yields info",
     buildEvent: () => event({ id: "e7", seriesId: "series-A" }),
-    family: makeFamily([
-      { personId: "p-me", seriesId: "series-A", role: "NEVER_ATTENDS" },
-    ]),
+    rules: [attendanceRule("p-me", "series-A", "NEVER_ATTENDS")],
     expectRole: "info",
-    expectBy: "attendance",
+    expectBy: "rule",
   },
   {
-    name: "attendance — SOMETIMES_ATTENDS yields soft",
+    name: "attendance rule — SOMETIMES_ATTENDS (soft) yields soft",
     buildEvent: () => event({ id: "e8", seriesId: "series-B" }),
-    family: makeFamily([
-      { personId: "p-me", seriesId: "series-B", role: "SOMETIMES_ATTENDS" },
-    ]),
+    rules: [attendanceRule("p-me", "series-B", "SOMETIMES_ATTENDS")],
     expectRole: "soft",
-    expectBy: "attendance",
+    expectBy: "rule",
   },
   {
-    name: "attendance — ATTENDS falls back to source default (hard)",
+    name: "attendance rule — ATTENDS (inherit) falls back to source default (hard)",
     buildEvent: () => event({ id: "e9", seriesId: "series-C" }),
-    family: makeFamily([
-      { personId: "p-me", seriesId: "series-C", role: "ATTENDS" },
-    ]),
+    rules: [attendanceRule("p-me", "series-C", "ATTENDS")],
     expectRole: "hard",
-    expectBy: "attendance",
+    expectBy: "rule",
   },
   {
-    name: "attendance — only matches when personId AND seriesId both match",
+    name: "attendance rule — only matches when personId AND seriesId both match",
     buildEvent: () => event({ id: "e10", seriesId: "series-A" }),
-    family: makeFamily([
-      { personId: "p-wife", seriesId: "series-A", role: "NEVER_ATTENDS" },
-    ]),
+    rules: [attendanceRule("p-wife", "series-A", "NEVER_ATTENDS")],
     expectRole: "hard",
     expectBy: "default",
   },
@@ -102,35 +94,48 @@ const cases: Case[] = [
     expectBy: "default",
   },
   {
-    name: "rule ordering — first match wins",
+    name: "rule ordering — equal specificity, earlier createdAt wins",
     buildEvent: () => event({ id: "e13", title: "Office hours" }),
     rules: [
-      rule({ match: { titleRegex: "Office" }, role: "soft", reason: "first" }),
-      rule({ match: { titleRegex: "Office" }, role: "info", reason: "second" }),
+      rule({ match: { titleRegex: "Office" }, role: "soft", reason: "first", createdAt: 1 }),
+      rule({ match: { titleRegex: "Office" }, role: "info", reason: "second", createdAt: 2 }),
     ],
     expectRole: "soft",
     expectBy: "rule",
   },
   {
-    name: "layer precedence — structural beats attendance (declined trumps ATTENDS)",
+    name: "rule specificity — more specific rule beats broader one regardless of order",
+    buildEvent: () => event({ id: "e13b", seriesId: "series-X", title: "Sync" }),
+    rules: [
+      rule({ match: { titleRegex: "Sync" }, role: "hard", reason: "broad", createdAt: 1 }),
+      rule({
+        match: { personId: "p-me", seriesId: "series-X" },
+        role: "info",
+        reason: "specific",
+        createdAt: 2,
+      }),
+    ],
+    expectRole: "info",
+    expectBy: "rule",
+  },
+  {
+    name: "layer precedence — structural beats rule (declined trumps ATTENDS)",
     buildEvent: () =>
       event({ id: "e14", seriesId: "series-C", rsvpStatus: "declined" }),
-    family: makeFamily([
-      { personId: "p-me", seriesId: "series-C", role: "ATTENDS" },
-    ]),
+    rules: [attendanceRule("p-me", "series-C", "ATTENDS")],
     expectRole: "info",
     expectBy: "structural",
   },
   {
-    name: "layer precedence — attendance beats matching rule",
+    name: "specificity — person+series attendance rule beats a broad title rule",
     buildEvent: () =>
       event({ id: "e15", seriesId: "series-D", title: "Practice" }),
-    family: makeFamily([
-      { personId: "p-me", seriesId: "series-D", role: "SOMETIMES_ATTENDS" },
-    ]),
-    rules: [rule({ match: { titleRegex: "Practice" }, role: "hard" })],
+    rules: [
+      attendanceRule("p-me", "series-D", "SOMETIMES_ATTENDS"),
+      rule({ match: { titleRegex: "Practice" }, role: "hard" }),
+    ],
     expectRole: "soft",
-    expectBy: "attendance",
+    expectBy: "rule",
   },
 ];
 
@@ -165,18 +170,11 @@ describe("resolveRole layered resolution", () => {
     expect(resolved.resolvedBy).toBe("rule");
   });
 
-  it("attendance edge id is propagated to ResolvedEvent", () => {
+  it("rule id is propagated to ResolvedEvent", () => {
     const e = event({ id: "e17", seriesId: "series-Z" });
-    const family = makeFamily([
-      {
-        id: "att-1",
-        personId: "p-me",
-        seriesId: "series-Z",
-        role: "NEVER_ATTENDS",
-      },
-    ]);
-    const resolved = resolveRole(e, family, []);
-    expect(resolved.attendanceEdgeId).toBe("att-1");
+    const r = attendanceRule("p-me", "series-Z", "NEVER_ATTENDS", { id: "rule-1" });
+    const resolved = resolveRole(e, makeFamily(), [r]);
+    expect(resolved.ruleId).toBe("rule-1");
   });
 
   it("supports PCRE-style inline (?i) flag in titleRegex", () => {
@@ -185,6 +183,15 @@ describe("resolveRole layered resolution", () => {
     const resolved = resolveRole(e, makeFamily(), [r]);
     expect(resolved.resolvedRole).toBe("soft");
     expect(resolved.resolvedBy).toBe("rule");
+  });
+
+  it("mask-effect rules are ignored by per-event resolution", () => {
+    const e = event({ id: "e20", title: "Vacation" });
+    const r = rule({ match: { titleRegex: "Vacation" }, role: "info", effect: "mask" });
+    const resolved = resolveRole(e, makeFamily(), [r]);
+    // The mask rule does not set the event's own role here (applyMasks does).
+    expect(resolved.resolvedBy).toBe("default");
+    expect(resolved.resolvedRole).toBe("hard");
   });
 
   it("unknown source defaults to hard with a clear reason", () => {

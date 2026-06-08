@@ -14,7 +14,6 @@ interface Resolution {
   by: ResolvedBy;
   reason: string;
   ruleId?: string;
-  attendanceEdgeId?: string;
 }
 
 export interface ResolveTrace {
@@ -44,14 +43,7 @@ export function resolveRoleWithTrace(
   });
   if (structural) return finalize(event, structural, trace);
 
-  const attendance = resolveAttendance(event, family);
-  trace.push({
-    layer: "attendance",
-    outcome: attendance ? describe(attendance) : "no matching attendance edge",
-  });
-  if (attendance) return finalize(event, attendance, trace);
-
-  const ruled = resolveRule(event, rules);
+  const ruled = resolveRule(event, family, rules);
   trace.push({
     layer: "rule",
     outcome: ruled ? describe(ruled) : "no matching rule",
@@ -74,9 +66,6 @@ function finalize(
     resolvedBy: resolution.by,
     resolvedReason: resolution.reason,
     ...(resolution.ruleId !== undefined ? { ruleId: resolution.ruleId } : {}),
-    ...(resolution.attendanceEdgeId !== undefined
-      ? { attendanceEdgeId: resolution.attendanceEdgeId }
-      : {}),
   };
   return { resolved, trace };
 }
@@ -110,51 +99,49 @@ function resolveStructural(event: CalEvent): Resolution | null {
   return null;
 }
 
-function resolveAttendance(
+/**
+ * The unified tiebreaker layer (formerly two layers: attendance + rules).
+ *
+ * Rules are sorted by *specificity* — a rule matching more fields wins, ties
+ * broken by creation time (older first). This makes a `personId+seriesId` rule
+ * (a former attendance edge) outrank a broad `sourceId` rule without anyone
+ * having to manage priorities. `mask`-effect rules are skipped here; their
+ * effect is cross-event and applied separately by `applyMasks`.
+ */
+function resolveRule(
   event: CalEvent,
   family: FamilyGraph,
+  rules: Rule[],
 ): Resolution | null {
-  if (!event.seriesId) return null;
-  const edge = family.attendance.find(
-    (a) => a.personId === event.personId && a.seriesId === event.seriesId,
-  );
-  if (!edge) return null;
-  const sourceDefault = findSource(family, event.sourceId)?.defaultRole ?? "hard";
+  const candidates = rules
+    .filter((r) => (r.effect ?? "self") === "self")
+    .filter((r) => matchesRule(event, r))
+    .sort(
+      (a, b) =>
+        ruleSpecificity(b) - ruleSpecificity(a) ||
+        (a.createdAt ?? 0) - (b.createdAt ?? 0),
+    );
+  const rule = candidates[0];
+  if (!rule) return null;
+
+  // `inherit` falls through to the source default (the former ATTENDS role).
   const role: Role =
-    edge.role === "NEVER_ATTENDS"
-      ? "info"
-      : edge.role === "SOMETIMES_ATTENDS"
-        ? "soft"
-        : sourceDefault;
-  const reason =
-    edge.reason ??
-    (edge.role === "ATTENDS"
-      ? `person attends series ${event.seriesId}`
-      : edge.role === "SOMETIMES_ATTENDS"
-        ? `person sometimes attends series ${event.seriesId}`
-        : `person never attends series ${event.seriesId}`);
-  const out: Resolution = { role, by: "attendance", reason };
-  if (edge.id !== undefined) out.attendanceEdgeId = edge.id;
+    rule.role === "inherit"
+      ? (findSource(family, event.sourceId)?.defaultRole ?? "hard")
+      : rule.role;
+  const out: Resolution = { role, by: "rule", reason: rule.reason };
+  if (rule.id !== undefined) out.ruleId = rule.id;
   return out;
 }
 
-function resolveRule(event: CalEvent, rules: Rule[]): Resolution | null {
-  for (const rule of rules) {
-    if (matchesRule(event, rule)) {
-      const out: Resolution = {
-        role: rule.role,
-        by: "rule",
-        reason: rule.reason,
-      };
-      if (rule.id !== undefined) out.ruleId = rule.id;
-      return out;
-    }
-  }
-  return null;
+/** Number of defined keys in a rule's match — its specificity score. */
+export function ruleSpecificity(rule: Rule): number {
+  return Object.values(rule.match).filter((v) => v !== undefined).length;
 }
 
-function matchesRule(event: CalEvent, rule: Rule): boolean {
+export function matchesRule(event: CalEvent, rule: Rule): boolean {
   const m = rule.match;
+  if (m.personId !== undefined && m.personId !== event.personId) return false;
   if (m.sourceId !== undefined && m.sourceId !== event.sourceId) return false;
   if (m.seriesId !== undefined && m.seriesId !== event.seriesId) return false;
   if (

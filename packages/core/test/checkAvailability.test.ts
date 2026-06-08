@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkAvailability } from "../src/checkAvailability.js";
-import { event, kid, makeFamily, me, rule, wife } from "./fixtures.js";
+import { attendanceRule, event, kid, makeFamily, me, rule, wife } from "./fixtures.js";
 
 const window = {
   start: new Date("2026-06-01T09:00:00Z"),
@@ -160,7 +160,7 @@ describe("checkAvailability verdicts", () => {
     expect(result.conflicts[0]!.overlapMinutes).toBe(8 * 60);
   });
 
-  it("attendance NEVER_ATTENDS on a kid practice keeps verdict free", () => {
+  it("attendance NEVER_ATTENDS rule on a kid practice keeps verdict free", () => {
     const result = checkAvailability({
       window,
       people: [kid],
@@ -172,14 +172,28 @@ describe("checkAvailability verdicts", () => {
           seriesId: "series-football",
         }),
       ],
-      family: makeFamily([
-        {
-          personId: "p-kid",
-          seriesId: "series-football",
-          role: "NEVER_ATTENDS",
-        },
-      ]),
-      rules: [],
+      family: makeFamily(),
+      rules: [attendanceRule("p-kid", "series-football", "NEVER_ATTENDS")],
+    });
+    expect(result.verdict).toBe("free");
+  });
+
+  it("OOO mask demotes a hard work meeting so the day is free", () => {
+    const result = checkAvailability({
+      window,
+      people: [me],
+      events: [
+        event({
+          id: "vacation",
+          title: "Vacation",
+          allDay: true,
+          start: new Date("2026-06-01T00:00:00Z"),
+          end: new Date("2026-06-02T00:00:00Z"),
+        }),
+        event({ id: "work-mtg", title: "Sprint planning" }),
+      ],
+      family: makeFamily(),
+      rules: [rule({ match: { titleRegex: "Vacation" }, role: "info", effect: "mask" })],
     });
     expect(result.verdict).toBe("free");
   });

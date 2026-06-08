@@ -1,11 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  checkReferences,
-  familyFileSchema,
-  rulesFileSchema,
-  type FamilyFile,
-  type RulesFile,
-} from "../src/config.ts";
+import { checkReferences, familyFileSchema, type FamilyFile } from "../src/config.ts";
 
 /** A schema-valid family with one person, one org-owned source, one attendance. */
 function baseFamily(): FamilyFile {
@@ -26,15 +20,13 @@ function baseFamily(): FamilyFile {
   });
 }
 
-const noRules: RulesFile = rulesFileSchema.parse({ rules: [] });
-
-function paths(family: FamilyFile, rules: RulesFile = noRules): string[] {
-  return checkReferences(family, rules).map((i) => i.path);
+function paths(family: FamilyFile): string[] {
+  return checkReferences(family).map((i) => i.path);
 }
 
 describe("checkReferences", () => {
   test("clean config reports nothing", () => {
-    expect(checkReferences(baseFamily(), noRules)).toEqual([]);
+    expect(checkReferences(baseFamily())).toEqual([]);
   });
 
   test("dangling sourceId on a person is reported", () => {
@@ -58,31 +50,14 @@ describe("checkReferences", () => {
   test("duplicate id across people and sources is reported", () => {
     const f = baseFamily();
     f.sources[0]!.id = "p-me";
-    const msgs = checkReferences(f, noRules);
+    const msgs = checkReferences(f);
     expect(msgs.some((i) => /duplicate id "p-me"/.test(i.message))).toBe(true);
   });
 
-  test("attendance personId must exist", () => {
+  test("attendance personId must exist (still validated for the seed import)", () => {
     const f = baseFamily();
     f.attendance[0]!.personId = "p-nobody";
     expect(paths(f)).toContain("attendance[0].personId");
-  });
-
-  test("invalid titleRegex is reported against rules", () => {
-    const rules = rulesFileSchema.parse({
-      rules: [{ match: { titleRegex: "(unterminated" }, role: "soft", reason: "x" }],
-    });
-    const issues = checkReferences(baseFamily(), rules);
-    expect(issues.some((i) => i.file === "rules" && /invalid regex/.test(i.message))).toBe(true);
-  });
-
-  test("rule sourceId referencing unknown source is reported", () => {
-    const rules = rulesFileSchema.parse({
-      rules: [{ match: { sourceId: "src-nope" }, role: "soft", reason: "x" }],
-    });
-    expect(checkReferences(baseFamily(), rules).map((i) => i.path)).toContain(
-      "rules[0].match.sourceId",
-    );
   });
 });
 

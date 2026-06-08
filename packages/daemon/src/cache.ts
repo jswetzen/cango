@@ -269,7 +269,6 @@ function serializeResolved(e: ResolvedEvent): SerializedEvent & {
   resolvedBy: ResolvedEvent["resolvedBy"];
   resolvedReason: string;
   ruleId?: string;
-  attendanceEdgeId?: string;
 } {
   return {
     ...serializeEvent(e),
@@ -277,7 +276,6 @@ function serializeResolved(e: ResolvedEvent): SerializedEvent & {
     resolvedBy: e.resolvedBy,
     resolvedReason: e.resolvedReason,
     ...(e.ruleId !== undefined ? { ruleId: e.ruleId } : {}),
-    ...(e.attendanceEdgeId !== undefined ? { attendanceEdgeId: e.attendanceEdgeId } : {}),
   };
 }
 
@@ -289,7 +287,6 @@ function deserializeResolved(json: string): ResolvedEvent {
     resolvedBy: s.resolvedBy,
     resolvedReason: s.resolvedReason,
     ...(s.ruleId !== undefined ? { ruleId: s.ruleId } : {}),
-    ...(s.attendanceEdgeId !== undefined ? { attendanceEdgeId: s.attendanceEdgeId } : {}),
   };
 }
 

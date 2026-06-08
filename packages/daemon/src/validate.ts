@@ -6,21 +6,20 @@ import {
   checkReferences,
   expandConnectionEnv,
   familyFileSchema,
-  rulesFileSchema,
   type FamilyFile,
-  type RulesFile,
   type ValidationIssue,
 } from "./config.ts";
 import { fetchSource, refreshWindow } from "./sources.ts";
 
 /**
- * cango-validate — check family.yaml / rules.yaml before deploying them.
+ * cango-validate — check family.yaml before deploying it.
  *
- *   bun run src/validate.ts <family.yaml> [rules.yaml] [--live]
+ *   bun run src/validate.ts <family.yaml> [--live]
  *
  * Static by default: runs the same Zod schemas the daemon uses plus semantic
  * cross-reference checks (dangling sourceIds, unknown ownerId/personId,
- * duplicate ids, bad title regexes). Exit 0 if clean, 1 if any issue.
+ * duplicate ids). Rules are no longer a file — they live in the rule store and
+ * are validated at write time. Exit 0 if clean, 1 if any issue.
  *
  * With --live it also connects to every source to confirm URLs and
  * credentials actually work. ${VAR} placeholders in source fields are expanded
@@ -44,7 +43,6 @@ interface Parsed<T> {
 
 function readArgs(argv: string[]): {
   familyPath: string | undefined;
-  rulesPath: string | undefined;
   live: boolean;
 } {
   const positional: string[] = [];
@@ -53,7 +51,7 @@ function readArgs(argv: string[]): {
     if (arg === "--live") live = true;
     else positional.push(arg);
   }
-  return { familyPath: positional[0], rulesPath: positional[1], live };
+  return { familyPath: positional[0], live };
 }
 
 async function parseFile<T>(
@@ -145,30 +143,21 @@ function reportFile(label: string, present: boolean, issues: ValidationIssue[]):
 }
 
 async function run(): Promise<void> {
-  const { familyPath, rulesPath, live } = readArgs(process.argv.slice(2));
+  const { familyPath, live } = readArgs(process.argv.slice(2));
   if (!familyPath) {
-    console.error("usage: cango-validate <family.yaml> [rules.yaml] [--live]");
+    console.error("usage: cango-validate <family.yaml> [--live]");
     process.exit(2);
   }
 
   const family = await parseFile<FamilyFile>(familyPath, "family", familyFileSchema);
-  const rules: Parsed<RulesFile> = rulesPath
-    ? await parseFile<RulesFile>(rulesPath, "rules", rulesFileSchema)
-    : { issues: [] };
 
-  // Cross-reference checks only run once both files passed their schema.
-  const refIssues =
-    family.doc && (rulesPath ? rules.doc : true)
-      ? checkReferences(family.doc, rules.doc ?? { rules: [] })
-      : [];
-
-  const familyIssues = [...family.issues, ...refIssues.filter((i) => i.file === "family")];
-  const rulesIssues = [...rules.issues, ...refIssues.filter((i) => i.file === "rules")];
+  // Cross-reference checks only run once the schema passed.
+  const refIssues = family.doc ? checkReferences(family.doc) : [];
+  const familyIssues = [...family.issues, ...refIssues];
 
   reportFile("family.yaml", true, familyIssues);
-  reportFile("rules.yaml", rulesPath !== undefined, rulesIssues);
 
-  const staticOk = familyIssues.length === 0 && rulesIssues.length === 0;
+  const staticOk = familyIssues.length === 0;
 
   let liveOk = true;
   if (live) {

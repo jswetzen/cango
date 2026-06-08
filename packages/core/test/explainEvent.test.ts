@@ -3,30 +3,30 @@ import { explainEvent } from "../src/explainEvent.js";
 import { event, makeFamily, rule } from "./fixtures.js";
 
 describe("explainEvent trace", () => {
-  it("traces every layer up to and including the deciding one", () => {
+  it("traces every layer up to and including the deciding one, plus mask", () => {
     const result = explainEvent(event({ id: "e1" }), makeFamily(), []);
     expect(result.trace.map((t) => t.layer)).toEqual([
       "structural",
-      "attendance",
       "rule",
       "default",
+      "mask",
     ]);
     expect(result.resolved.resolvedBy).toBe("default");
   });
 
-  it("stops naming a deciding layer at the first hit, but earlier layers report no-match", () => {
+  it("structural decision short-circuits the per-event layers; mask still reports", () => {
     const result = explainEvent(
       event({ id: "e2", rsvpStatus: "declined" }),
       makeFamily(),
       [],
     );
-    expect(result.trace[0]!.layer).toBe("structural");
+    expect(result.trace.map((t) => t.layer)).toEqual(["structural", "mask"]);
     expect(result.trace[0]!.outcome).toMatch(/info \(structural\)/);
-    expect(result.trace).toHaveLength(1);
+    expect(result.trace.at(-1)!.outcome).toMatch(/no out-of-office mask/);
     expect(result.resolved.resolvedBy).toBe("structural");
   });
 
-  it("shows attendance miss then rule hit", () => {
+  it("shows structural miss then rule hit", () => {
     const result = explainEvent(
       event({ id: "e3", title: "Standup" }),
       makeFamily(),
@@ -34,11 +34,29 @@ describe("explainEvent trace", () => {
     );
     expect(result.trace.map((t) => t.layer)).toEqual([
       "structural",
-      "attendance",
       "rule",
+      "mask",
     ]);
-    const rules = result.trace.find((t) => t.layer === "rule");
-    expect(rules?.outcome).toMatch(/soft \(rule\)/);
+    const ruleEntry = result.trace.find((t) => t.layer === "rule");
+    expect(ruleEntry?.outcome).toMatch(/soft \(rule\)/);
     expect(result.resolved.resolvedBy).toBe("rule");
+  });
+
+  it("explains an OOO mask demoting a same-source neighbour", () => {
+    const vacation = event({
+      id: "vacation",
+      title: "Vacation",
+      allDay: true,
+      start: new Date("2026-06-01T00:00:00Z"),
+      end: new Date("2026-06-02T00:00:00Z"),
+    });
+    const meeting = event({ id: "mtg", title: "Sprint planning" });
+    const rules = [rule({ match: { titleRegex: "Vacation" }, role: "info", effect: "mask" })];
+
+    const result = explainEvent(meeting, makeFamily(), rules, [vacation]);
+    expect(result.resolved.resolvedRole).toBe("info");
+    const mask = result.trace.at(-1)!;
+    expect(mask.layer).toBe("mask");
+    expect(mask.outcome).toMatch(/out-of-office: Vacation/);
   });
 });

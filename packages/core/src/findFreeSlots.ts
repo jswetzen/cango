@@ -1,3 +1,4 @@
+import { applyMasks } from "./applyMasks.js";
 import { resolveRole } from "./resolveRole.js";
 import type { FindFreeSlotsInput, FreeSlot } from "./types.js";
 
@@ -25,13 +26,19 @@ export function findFreeSlots(input: FindFreeSlotsInput): FreeSlot[] {
     ? expandWorkingHours(rangeStart, rangeEnd, workingHours)
     : [{ start: rangeStart, end: rangeEnd }];
 
+  // Resolve + mask the whole set first; only `hard` events for the requested
+  // people block a slot (a masked-out work meeting no longer does).
+  const resolvedAll = applyMasks(
+    events.map((ev) => resolveRole(ev, family, rules)),
+    rules,
+  );
+
   const busy: Interval[] = [];
-  for (const ev of events) {
-    if (!peopleIds.has(ev.personId)) continue;
-    const resolved = resolveRole(ev, family, rules);
+  for (const resolved of resolvedAll) {
+    if (!peopleIds.has(resolved.personId)) continue;
     if (resolved.resolvedRole !== "hard") continue;
-    const start = Math.max(ev.start.getTime(), rangeStart);
-    const end = Math.min(ev.end.getTime(), rangeEnd);
+    const start = Math.max(resolved.start.getTime(), rangeStart);
+    const end = Math.min(resolved.end.getTime(), rangeEnd);
     if (end <= start) continue;
     busy.push({ start, end });
   }

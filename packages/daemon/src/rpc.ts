@@ -1,20 +1,27 @@
 import {
+  applyMasks,
   checkAvailability,
+  compileRegex,
   explainEvent,
   findFreeSlots,
   resolveRole,
   type CalEvent,
   type ResolvedEvent,
+  type Rule,
+  type RuleMatch,
 } from "@cango/core";
 import { z } from "zod";
 import type { Cache } from "./cache.ts";
+import { ruleEffectSchema, ruleMatchSchema, ruleRoleSchema, toRuleMatch } from "./config.ts";
 import type { LoadedConfig } from "./config.ts";
 import type { Refresher } from "./cron.ts";
+import type { RuleStore } from "./ruleStore.ts";
 import { formatInZone, parseInZone, zonedDayIndex } from "./tz.ts";
 
 export interface RpcContext {
   cache: Cache;
   getConfig: () => LoadedConfig;
+  rules: RuleStore;
   refresher: Refresher;
   reload: () => Promise<void>;
 }
@@ -86,6 +93,32 @@ const createEventParams = (tz: string) =>
     })
     .refine((p) => p.end > p.start, { message: "end must be after start" });
 
+// Rule CRUD params are date-free, so static. `ruleMatchSchema` accepts the
+// snake_case match keys at the wire boundary and transforms them to the core
+// camelCase `RuleMatch`.
+const createRuleParams = z.object({
+  match: ruleMatchSchema,
+  role: ruleRoleSchema,
+  effect: ruleEffectSchema.default("self"),
+  reason: z.string().min(1).max(500),
+});
+
+const amendRuleParams = z.object({
+  id: z.string().min(1),
+  match: ruleMatchSchema.optional(),
+  role: ruleRoleSchema.optional(),
+  effect: ruleEffectSchema.optional(),
+  reason: z.string().min(1).max(500).optional(),
+});
+
+const retractRuleParams = z.object({
+  id: z.string().min(1),
+  reason: z.string().optional(),
+});
+
+// `.default({})` so a no-args `listRules` call (params undefined) is accepted.
+const listRulesParams = z.object({ include_retracted: z.boolean().default(false) }).default({});
+
 type Handler = (ctx: RpcContext, params: unknown) => unknown | Promise<unknown>;
 
 export const methods: Record<string, Handler> = {
@@ -100,7 +133,7 @@ export const methods: Record<string, Handler> = {
       people,
       events,
       family: config.family,
-      rules: config.rules,
+      rules: ctx.rules.active(),
     });
     return withStatus(ctx, {
       verdict: result.verdict,
@@ -124,7 +157,7 @@ export const methods: Record<string, Handler> = {
       people,
       events,
       family: config.family,
-      rules: config.rules,
+      rules: ctx.rules.active(),
       ...(p.working_hours ? { workingHours: p.working_hours } : {}),
     });
     return withStatus(ctx, {
@@ -138,9 +171,15 @@ export const methods: Record<string, Handler> = {
     const p = listEventsParams(tz).parse(raw);
     const events = ctx.cache.eventsInWindow(p.start, p.end, p.people);
     const exclude = p.exclude_roles ? new Set(p.exclude_roles) : null;
-    const resolved = events
-      .map((e) => resolveCached(ctx, e))
-      .filter((r) => !exclude || !exclude.has(r.resolvedRole));
+    const active = ctx.rules.active();
+    const rulesVersion = ctx.rules.version();
+    // Per-event resolution is cached; out-of-office masking is a cross-event
+    // post-pass applied on top of the cached results.
+    const masked = applyMasks(
+      events.map((e) => resolveCached(ctx, e, active, rulesVersion)),
+      active,
+    );
+    const resolved = masked.filter((r) => !exclude || !exclude.has(r.resolvedRole));
     const total = resolved.length;
     const page = resolved.slice(p.offset, p.offset + p.limit);
     return withStatus(ctx, {
@@ -161,7 +200,12 @@ export const methods: Record<string, Handler> = {
     if (!event) {
       throw new RpcError(-32004, `event not found: ${p.event_id}`);
     }
-    const result = explainEvent(event, config.family, config.rules);
+    // Neighbours overlapping this event's span let explainEvent evaluate
+    // out-of-office masking (a cross-event effect).
+    const neighbors = ctx.cache
+      .eventsInWindow(event.start, event.end)
+      .filter((e) => !(e.id === event.id && e.sourceId === event.sourceId));
+    const result = explainEvent(event, config.family, ctx.rules.active(), neighbors);
     return withStatus(ctx, {
       resolved: serializeResolved(result.resolved, tz),
       trace: result.trace,
@@ -202,9 +246,69 @@ export const methods: Record<string, Handler> = {
       allDay: p.all_day,
     });
     const event = findEventById(ctx, uid);
+    const resolvedEvent = event
+      ? resolveCached(ctx, event, ctx.rules.active(), ctx.rules.version())
+      : null;
     return withStatus(ctx, {
-      event: event ? serializeResolved(resolveCached(ctx, event), tz) : { id: uid },
+      event: resolvedEvent ? serializeResolved(resolvedEvent, tz) : { id: uid },
     });
+  },
+
+  listRules(ctx, raw) {
+    const tz = ctx.getConfig().settings.timezone;
+    const p = listRulesParams.parse(raw);
+    const rules = ctx.rules.list(p.include_retracted);
+    return withStatus(ctx, { rules: rules.map((r) => serializeRule(r, tz)) });
+  },
+
+  createRule(ctx, raw) {
+    const config = ctx.getConfig();
+    const tz = config.settings.timezone;
+    const p = createRuleParams.parse(raw);
+    const match = toRuleMatch(p.match);
+    validateRuleMatch(config, match);
+    const rule = ctx.rules.create({
+      match,
+      role: p.role,
+      effect: p.effect,
+      reason: p.reason,
+    });
+    ctx.cache.clearResolvedCache();
+    return withStatus(ctx, { rule: serializeRule(rule, tz) });
+  },
+
+  amendRule(ctx, raw) {
+    const config = ctx.getConfig();
+    const tz = config.settings.timezone;
+    const p = amendRuleParams.parse(raw);
+    const match = p.match !== undefined ? toRuleMatch(p.match) : undefined;
+    if (match) validateRuleMatch(config, match);
+    let rule;
+    try {
+      rule = ctx.rules.amend(p.id, {
+        ...(match !== undefined ? { match } : {}),
+        ...(p.role !== undefined ? { role: p.role } : {}),
+        ...(p.effect !== undefined ? { effect: p.effect } : {}),
+        ...(p.reason !== undefined ? { reason: p.reason } : {}),
+      });
+    } catch (err) {
+      throw new RpcError(-32004, err instanceof Error ? err.message : String(err));
+    }
+    ctx.cache.clearResolvedCache();
+    return withStatus(ctx, { rule: serializeRule(rule, tz) });
+  },
+
+  retractRule(ctx, raw) {
+    const tz = ctx.getConfig().settings.timezone;
+    const p = retractRuleParams.parse(raw);
+    let rule;
+    try {
+      rule = ctx.rules.retract(p.id);
+    } catch (err) {
+      throw new RpcError(-32004, err instanceof Error ? err.message : String(err));
+    }
+    ctx.cache.clearResolvedCache();
+    return withStatus(ctx, { rule: serializeRule(rule, tz) });
   },
 
   async reloadConfig(ctx) {
@@ -252,23 +356,78 @@ function withStatus<T extends Record<string, unknown>>(ctx: RpcContext, body: T)
   return { ...body, degraded: stale.length > 0, stale_sources: stale };
 }
 
+function validateRuleMatch(config: LoadedConfig, match: RuleMatch): void {
+  if (Object.values(match).every((v) => v === undefined)) {
+    throw new RpcError(-32602, "rule match must constrain at least one field");
+  }
+  if (match.titleRegex !== undefined) {
+    try {
+      compileRegex(match.titleRegex);
+    } catch (err) {
+      throw new RpcError(
+        -32602,
+        `invalid titleRegex: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  if (match.sourceId !== undefined && !config.family.sources.some((s) => s.id === match.sourceId)) {
+    throw new RpcError(-32602, `unknown source: ${match.sourceId}`);
+  }
+  if (match.personId !== undefined && !config.family.people.some((p) => p.id === match.personId)) {
+    throw new RpcError(-32602, `unknown person: ${match.personId}`);
+  }
+}
+
+function serializeMatch(m: RuleMatch): Record<string, unknown> {
+  return {
+    ...(m.personId !== undefined ? { person_id: m.personId } : {}),
+    ...(m.sourceId !== undefined ? { source_id: m.sourceId } : {}),
+    ...(m.titleRegex !== undefined ? { title_regex: m.titleRegex } : {}),
+    ...(m.seriesId !== undefined ? { series_id: m.seriesId } : {}),
+    ...(m.organizerIsSelf !== undefined ? { organizer_is_self: m.organizerIsSelf } : {}),
+    ...(m.rsvpStatusIn !== undefined ? { rsvp_status_in: m.rsvpStatusIn } : {}),
+  };
+}
+
+function serializeRule(r: Rule, tz: string) {
+  return {
+    id: r.id,
+    match: serializeMatch(r.match),
+    role: r.role,
+    effect: r.effect ?? "self",
+    reason: r.reason,
+    ...(r.createdAt !== undefined ? { created_at: formatInZone(new Date(r.createdAt), tz) } : {}),
+    ...(r.updatedAt !== undefined ? { updated_at: formatInZone(new Date(r.updatedAt), tz) } : {}),
+    ...(r.retractedAt !== undefined
+      ? { retracted_at: formatInZone(new Date(r.retractedAt), tz) }
+      : {}),
+  };
+}
+
 function selectPeople(config: LoadedConfig, ids?: string[]) {
   if (!ids || ids.length === 0) return config.family.people;
   const wanted = new Set(ids);
   return config.family.people.filter((p) => wanted.has(p.id));
 }
 
-function resolveCached(ctx: RpcContext, event: CalEvent): ResolvedEvent {
+// `rules`/`rulesVersion` are passed in (computed once by the caller) so a
+// per-event map doesn't recompute the rule-store version hash for every event.
+function resolveCached(
+  ctx: RpcContext,
+  event: CalEvent,
+  rules: Rule[],
+  rulesVersion: string,
+): ResolvedEvent {
   const config = ctx.getConfig();
   const cached = ctx.cache.getResolved(
     event.sourceId,
     event.id,
     config.familyVersion,
-    config.rulesVersion,
+    rulesVersion,
   );
   if (cached) return cached;
-  const resolved = resolveRole(event, config.family, config.rules);
-  ctx.cache.putResolved(config.familyVersion, config.rulesVersion, resolved);
+  const resolved = resolveRole(event, config.family, rules);
+  ctx.cache.putResolved(config.familyVersion, rulesVersion, resolved);
   return resolved;
 }
 
@@ -315,7 +474,6 @@ function serializeResolved(
       : { resolved_by: e.resolvedBy, resolved_reason: e.resolvedReason }),
     ...(span > 1 ? { day_span: span } : {}),
     ...(e.ruleId !== undefined ? { rule_id: e.ruleId } : {}),
-    ...(e.attendanceEdgeId !== undefined ? { attendance_edge_id: e.attendanceEdgeId } : {}),
     ...(e.rsvpStatus !== undefined ? { rsvp_status: e.rsvpStatus } : {}),
   };
 }

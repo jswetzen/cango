@@ -1,11 +1,4 @@
-import type {
-  AttendanceEdge,
-  CalEvent,
-  FamilyGraph,
-  Person,
-  Rule,
-  SourceRef,
-} from "../src/types.js";
+import type { CalEvent, FamilyGraph, Person, Rule, SourceRef } from "../src/types.js";
 
 export const sourceWorkHard: SourceRef = {
   id: "src-work",
@@ -46,15 +39,11 @@ export const kid: Person = {
   sources: [sourceKidClub],
 };
 
-export function makeFamily(
-  attendance: AttendanceEdge[] = [],
-  extraSources: SourceRef[] = [],
-): FamilyGraph {
+export function makeFamily(extraSources: SourceRef[] = []): FamilyGraph {
   return {
     people: [me, wife, kid],
     organizations: [],
     sources: [sourceWorkHard, sourceWifeWork, sourceKidClub, ...extraSources],
-    attendance,
   };
 }
 
@@ -74,5 +63,25 @@ export function rule(partial: Partial<Rule> & Pick<Rule, "match" | "role">): Rul
   return {
     reason: "test rule",
     ...partial,
+  };
+}
+
+/**
+ * Build a rule equivalent to a former attendance edge: matches a person+series
+ * and maps the old attendance role to the unified role
+ * (ATTENDS→inherit, SOMETIMES_ATTENDS→soft, NEVER_ATTENDS→info).
+ */
+export function attendanceRule(
+  personId: string,
+  seriesId: string,
+  kind: "ATTENDS" | "SOMETIMES_ATTENDS" | "NEVER_ATTENDS",
+  extra: Partial<Rule> = {},
+): Rule {
+  const role = kind === "ATTENDS" ? "inherit" : kind === "SOMETIMES_ATTENDS" ? "soft" : "info";
+  return {
+    match: { personId, seriesId },
+    role,
+    reason: `${kind} ${seriesId}`,
+    ...extra,
   };
 }

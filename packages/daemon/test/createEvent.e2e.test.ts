@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Cache } from "../src/cache.ts";
 import { loadConfig, type LoadedConfig } from "../src/config.ts";
 import { Refresher } from "../src/cron.ts";
+import { RuleStore } from "../src/ruleStore.ts";
 import { startServer, type SocketServer } from "../src/server.ts";
 import { rpcCall } from "../src/client.ts";
 import type { RpcContext } from "../src/rpc.ts";
@@ -45,8 +46,6 @@ sources:
     url: https://example.invalid/me.ics
 `;
 
-const RULES = `rules: []\n`;
-
 // A fake CalDAV backend: createCalDav records the write and models the server
 // so the next fetchCalDav returns the freshly created event (what refreshOnce
 // pulls into the cache).
@@ -82,19 +81,19 @@ describe("daemon createEvent over the socket", () => {
   let server: SocketServer;
   let socketPath: string;
   let config: LoadedConfig;
+  let rules: RuleStore;
   let refresher: Refresher;
   let written: Array<{ title: string }>;
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), "cango-create-"));
     const familyPath = join(dir, "family.yaml");
-    const rulesPath = join(dir, "rules.yaml");
     socketPath = join(dir, "cango.sock");
     writeFileSync(familyPath, FAMILY_YAML);
-    writeFileSync(rulesPath, RULES);
 
-    config = await loadConfig(familyPath, rulesPath);
+    config = await loadConfig(familyPath);
     cache = new Cache(":memory:");
+    rules = new RuleStore(":memory:");
     const fake = fakeAdapters();
     written = fake.written;
     // Pin the clock near the event so the warm refresh window covers it.
@@ -104,6 +103,7 @@ describe("daemon createEvent over the socket", () => {
     const ctx: RpcContext = {
       cache,
       getConfig: () => config,
+      rules,
       refresher,
       reload: async () => {},
     };
@@ -113,6 +113,7 @@ describe("daemon createEvent over the socket", () => {
   afterEach(() => {
     server.stop();
     cache.close();
+    rules.close();
     rmSync(dir, { recursive: true, force: true });
   });
 

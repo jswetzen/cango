@@ -6,7 +6,7 @@ import type { Adapters } from "../src/sources.ts";
 import type { CalEvent } from "@cango/core";
 
 function makeConfig(): LoadedConfig {
-  const { family, connections, settings } = buildFamily({
+  const { family, connections, settings, attendanceSeed } = buildFamily({
     people: [{ id: "p-me", name: "Me", sourceIds: ["src-ics"] }],
     organizations: [],
     sources: [
@@ -25,12 +25,11 @@ function makeConfig(): LoadedConfig {
   });
   return {
     family,
-    rules: [],
     connections,
     settings,
     personIdForSource: () => "p-me",
     familyVersion: "fv",
-    rulesVersion: "rv",
+    attendanceSeed,
   };
 }
 

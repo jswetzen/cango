@@ -1,12 +1,20 @@
 export type Role = "hard" | "soft" | "info" | "conditional";
 
+/** A rule may set a concrete role, or `inherit` to fall through to the source
+ * default — this reproduces the old attendance `ATTENDS` semantic. The
+ * *resolved* role is always a concrete `Role`. */
+export type RuleRole = Role | "inherit";
+
+/** `self` decides the matched event's own role (the common case, including the
+ * former attendance edges). `mask` marks an out-of-office/vacation event that
+ * demotes other events on its own calendar (source) that it spans. */
+export type RuleEffect = "self" | "mask";
+
 export type Verdict = "free" | "soft_conflict" | "hard_conflict";
 
 export type RsvpStatus = "accepted" | "tentative" | "declined" | "needsAction";
 
-export type AttendanceRole = "ATTENDS" | "SOMETIMES_ATTENDS" | "NEVER_ATTENDS";
-
-export type ResolvedBy = "default" | "structural" | "attendance" | "rule" | "llm";
+export type ResolvedBy = "default" | "structural" | "rule" | "llm";
 
 export interface SourceRef {
   id: string;
@@ -27,19 +35,10 @@ export interface Organization {
   publishes: SourceRef[];
 }
 
-export interface AttendanceEdge {
-  id?: string;
-  personId: string;
-  seriesId: string;
-  role: AttendanceRole;
-  reason?: string;
-}
-
 export interface FamilyGraph {
   people: Person[];
   organizations: Organization[];
   sources: SourceRef[];
-  attendance: AttendanceEdge[];
 }
 
 export interface CalEvent {
@@ -59,6 +58,7 @@ export interface CalEvent {
 }
 
 export interface RuleMatch {
+  personId?: string;
   sourceId?: string;
   titleRegex?: string;
   seriesId?: string;
@@ -69,8 +69,15 @@ export interface RuleMatch {
 export interface Rule {
   id?: string;
   match: RuleMatch;
-  role: Role;
+  role: RuleRole;
+  /** Defaults to "self" when absent. */
+  effect?: RuleEffect;
   reason: string;
+  /** Epoch ms; used as the specificity tiebreaker (older wins). Optional so
+   * core stays storage-agnostic. */
+  createdAt?: number;
+  updatedAt?: number;
+  retractedAt?: number;
 }
 
 export interface ResolvedEvent extends CalEvent {
@@ -78,7 +85,6 @@ export interface ResolvedEvent extends CalEvent {
   resolvedBy: ResolvedBy;
   resolvedReason: string;
   ruleId?: string;
-  attendanceEdgeId?: string;
 }
 
 export interface Conflict {
@@ -116,7 +122,7 @@ export interface FreeSlot {
 }
 
 export interface ExplainTraceEntry {
-  layer: "structural" | "attendance" | "rule" | "default";
+  layer: "structural" | "rule" | "default" | "mask";
   outcome: string;
 }
 

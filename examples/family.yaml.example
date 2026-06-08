@@ -75,6 +75,12 @@ sources:
     defaultRole: info
     url: https://football.example.com/team-a.ics
 
+# DEPRECATED — attendance edges are no longer a live config layer. On the
+# daemon's first run these are seeded ONCE into the durable rule store
+# (state.db) and ignored thereafter; manage rules at runtime via the agent
+# (record_rule / amend_rule / forget_rule). Kept here only so an existing
+# family.yaml still validates and can be imported on first boot. New setups can
+# omit this block and add the equivalent rules through the agent instead.
 attendance:
   - personId: p-kid
     seriesId: football-u11-training

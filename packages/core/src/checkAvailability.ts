@@ -1,10 +1,10 @@
+import { applyMasks } from "./applyMasks.js";
 import { resolveRole } from "./resolveRole.js";
 import type {
   CalEvent,
   CheckAvailabilityInput,
   CheckAvailabilityResult,
   Conflict,
-  ResolvedEvent,
   Verdict,
 } from "./types.js";
 
@@ -24,13 +24,19 @@ export function checkAvailability(
   let hasHard = false;
   let hasSoft = false;
 
-  for (const ev of events) {
-    const person = peopleById.get(ev.personId);
+  // Resolve every event, then apply out-of-office masking across the set before
+  // tallying conflicts (a masked event becomes `info` and stops blocking).
+  const resolvedAll = applyMasks(
+    events.map((ev) => resolveRole(ev, family, rules)),
+    rules,
+  );
+
+  for (const resolved of resolvedAll) {
+    const person = peopleById.get(resolved.personId);
     if (!person) continue;
-    const overlap = overlapMinutes(ev, windowStart, windowEnd);
+    const overlap = overlapMinutes(resolved, windowStart, windowEnd);
     if (overlap <= 0) continue;
 
-    const resolved: ResolvedEvent = resolveRole(ev, family, rules);
     if (resolved.resolvedRole === "info") continue;
     if (resolved.resolvedRole === "conditional") continue;
 

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { compileRegex, type FamilyGraph, type Role, type Rule } from "@cango/core";
+import type { FamilyGraph, Role, RuleMatch } from "@cango/core";
 import { isValidTimeZone } from "./tz.ts";
 
 const roleSchema = z.enum(["hard", "soft", "info", "conditional"]);
@@ -61,6 +61,10 @@ const orgSchema = z.object({
   sourceIds: z.array(z.string()).default([]),
 });
 
+// DEPRECATED. Attendance edges are no longer a live config layer — they are
+// seeded once into the rule store (state.db) on first run and managed via the
+// agent thereafter. This schema is kept only so existing family.yaml files
+// still validate and can be read by the one-time seeder.
 const attendanceSchema = z.object({
   id: z.string().optional(),
   personId: z.string().min(1),
@@ -88,25 +92,39 @@ export const familyFileSchema = z.object({
     .default({ refreshIntervalMinutes: 60, maxStaleHours: 6, timezone: "UTC" }),
 });
 
-const ruleSchema = z.object({
-  id: z.string().optional(),
-  match: z.object({
-    sourceId: z.string().optional(),
-    titleRegex: z.string().optional(),
-    seriesId: z.string().optional(),
-    organizerIsSelf: z.boolean().optional(),
-    rsvpStatusIn: z.array(rsvpSchema).optional(),
-  }),
-  role: roleSchema,
-  reason: z.string(),
+// Rule shape, shared by the create/amend RPC param schemas (rpc.ts). Rules are
+// no longer loaded from a file — they live in the rule store — but their shape
+// is still validated at write time. `personId` (new vs the old rules.yaml) and
+// the `inherit` role let a rule subsume the former attendance edges; `mask` is
+// the out-of-office cross-event effect.
+// Wire shape is snake_case (matching the rest of the RPC boundary); map to the
+// core camelCase `RuleMatch` with `toRuleMatch`.
+export const ruleMatchSchema = z.object({
+  person_id: z.string().optional(),
+  source_id: z.string().optional(),
+  title_regex: z.string().optional(),
+  series_id: z.string().optional(),
+  organizer_is_self: z.boolean().optional(),
+  rsvp_status_in: z.array(rsvpSchema).optional(),
 });
 
-export const rulesFileSchema = z.object({
-  rules: z.array(ruleSchema).default([]),
-});
+export const ruleRoleSchema = z.enum(["hard", "soft", "info", "conditional", "inherit"]);
+export const ruleEffectSchema = z.enum(["self", "mask"]);
+
+/** snake_case wire match → core `RuleMatch`. Conditional spreads keep optional
+ * keys absent (not `undefined`) for exactOptionalPropertyTypes. */
+export function toRuleMatch(m: z.infer<typeof ruleMatchSchema>): RuleMatch {
+  return {
+    ...(m.person_id !== undefined ? { personId: m.person_id } : {}),
+    ...(m.source_id !== undefined ? { sourceId: m.source_id } : {}),
+    ...(m.title_regex !== undefined ? { titleRegex: m.title_regex } : {}),
+    ...(m.series_id !== undefined ? { seriesId: m.series_id } : {}),
+    ...(m.organizer_is_self !== undefined ? { organizerIsSelf: m.organizer_is_self } : {}),
+    ...(m.rsvp_status_in !== undefined ? { rsvpStatusIn: m.rsvp_status_in } : {}),
+  };
+}
 
 export type FamilyFile = z.infer<typeof familyFileSchema>;
-export type RulesFile = z.infer<typeof rulesFileSchema>;
 export type SourceDef = z.infer<typeof sourceSchema>;
 
 /** A single problem found by the standalone validator. */
@@ -127,7 +145,7 @@ export interface ValidationIssue {
  *
  * Pure and side-effect free: takes already-parsed documents, returns issues.
  */
-export function checkReferences(family: FamilyFile, rules: RulesFile): ValidationIssue[] {
+export function checkReferences(family: FamilyFile): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const add = (path: string, message: string, file: "family" | "rules" = "family") =>
     issues.push({ file, path, message });
@@ -201,26 +219,6 @@ export function checkReferences(family: FamilyFile, rules: RulesFile): Validatio
     }
   }
 
-  // Rule references: regex must compile; sourceId (if given) should exist.
-  for (const [i, r] of rules.rules.entries()) {
-    if (r.match.titleRegex !== undefined) {
-      try {
-        // Use the same compiler the runtime uses so PCRE-style (?i) prefixes
-        // that the daemon accepts aren't flagged as errors here.
-        compileRegex(r.match.titleRegex);
-      } catch (err) {
-        add(
-          `rules[${i}].match.titleRegex`,
-          `invalid regex: ${err instanceof Error ? err.message : String(err)}`,
-          "rules",
-        );
-      }
-    }
-    if (r.match.sourceId !== undefined && !sourceIds.has(r.match.sourceId)) {
-      add(`rules[${i}].match.sourceId`, `unknown source "${r.match.sourceId}"`, "rules");
-    }
-  }
-
   return issues;
 }
 
@@ -255,17 +253,22 @@ export interface DaemonSettings {
 
 export interface LoadedConfig {
   family: FamilyGraph;
-  rules: Rule[];
   connections: SourceConnection[];
   settings: DaemonSettings;
   /** sourceId -> personId, derived from source ownership when owned by a person. */
   personIdForSource: (sourceId: string) => string;
   familyVersion: string;
-  rulesVersion: string;
+  /** Deprecated family.yaml attendance edges, for the one-time rule-store seed. */
+  attendanceSeed: FamilyFile["attendance"];
 }
 
 export interface FamilySource {
-  load(): Promise<{ family: FamilyGraph; connections: SourceConnection[]; settings: DaemonSettings }>;
+  load(): Promise<{
+    family: FamilyGraph;
+    connections: SourceConnection[];
+    settings: DaemonSettings;
+    attendanceSeed: FamilyFile["attendance"];
+  }>;
 }
 
 /**
@@ -330,6 +333,7 @@ export class YamlFamilySource implements FamilySource {
     family: FamilyGraph;
     connections: SourceConnection[];
     settings: DaemonSettings;
+    attendanceSeed: FamilyFile["attendance"];
   }> {
     const text = await readFile(this.path, "utf8");
     const parsed = familyFileSchema.parse(parseYaml(text) ?? {});
@@ -355,6 +359,7 @@ export function buildFamily(file: FamilyFile): {
   family: FamilyGraph;
   connections: SourceConnection[];
   settings: DaemonSettings;
+  attendanceSeed: FamilyFile["attendance"];
 } {
   const sourceRefs = file.sources.map((s) => ({
     id: s.id,
@@ -380,13 +385,6 @@ export function buildFamily(file: FamilyFile): {
         .filter((r): r is NonNullable<typeof r> => r !== undefined),
     })),
     sources: sourceRefs,
-    attendance: file.attendance.map((a) => ({
-      ...(a.id !== undefined ? { id: a.id } : {}),
-      personId: a.personId,
-      seriesId: a.seriesId,
-      role: a.role,
-      ...(a.reason !== undefined ? { reason: a.reason } : {}),
-    })),
   };
 
   const connections: SourceConnection[] = file.sources.map((s) =>
@@ -410,35 +408,12 @@ export function buildFamily(file: FamilyFile): {
         },
   );
 
-  return { family, connections, settings: file.settings };
+  return { family, connections, settings: file.settings, attendanceSeed: file.attendance };
 }
 
-export async function loadConfig(
-  familyPath: string,
-  rulesPath: string,
-): Promise<LoadedConfig> {
+export async function loadConfig(familyPath: string): Promise<LoadedConfig> {
   const familySource = new YamlFamilySource(familyPath);
-  const { family, connections, settings } = await familySource.load();
-
-  const rulesText = await readFile(rulesPath, "utf8").catch(() => "");
-  const rulesParsed = rulesFileSchema.parse(rulesText ? (parseYaml(rulesText) ?? {}) : {});
-  const rules: Rule[] = rulesParsed.rules.map((r) => {
-    const match: Rule["match"] = {
-      ...(r.match.sourceId !== undefined ? { sourceId: r.match.sourceId } : {}),
-      ...(r.match.titleRegex !== undefined ? { titleRegex: r.match.titleRegex } : {}),
-      ...(r.match.seriesId !== undefined ? { seriesId: r.match.seriesId } : {}),
-      ...(r.match.organizerIsSelf !== undefined
-        ? { organizerIsSelf: r.match.organizerIsSelf }
-        : {}),
-      ...(r.match.rsvpStatusIn !== undefined ? { rsvpStatusIn: r.match.rsvpStatusIn } : {}),
-    };
-    return {
-      ...(r.id !== undefined ? { id: r.id } : {}),
-      match,
-      role: r.role as Role,
-      reason: r.reason,
-    };
-  });
+  const { family, connections, settings, attendanceSeed } = await familySource.load();
 
   const ownerBySource = new Map<string, { ownedBy: string; ownerId: string }>(
     family.sources.map((s) => [s.id, { ownedBy: s.ownedBy, ownerId: s.ownerId }]),
@@ -458,12 +433,11 @@ export async function loadConfig(
 
   return {
     family,
-    rules,
     connections,
     settings,
     personIdForSource,
     familyVersion: hashJson(family),
-    rulesVersion: hashJson(rules),
+    attendanceSeed,
   };
 }
 

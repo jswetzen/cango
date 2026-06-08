@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Cache } from "../src/cache.ts";
 import { loadConfig, type LoadedConfig } from "../src/config.ts";
 import { Refresher } from "../src/cron.ts";
+import { RuleStore } from "../src/ruleStore.ts";
 import { startServer, type SocketServer } from "../src/server.ts";
 import { rpcCall } from "../src/client.ts";
 import type { RpcContext } from "../src/rpc.ts";
@@ -45,24 +46,6 @@ attendance:
     reason: on the squad
 `;
 
-const RULES_SOFT = `
-rules:
-  - id: standup-soft
-    match:
-      titleRegex: "(?i)standup"
-    role: soft
-    reason: optional standup
-`;
-
-const RULES_HARD = `
-rules:
-  - id: standup-hard
-    match:
-      titleRegex: "(?i)standup"
-    role: hard
-    reason: mandatory now
-`;
-
 function event(p: Partial<CalEvent> & Pick<CalEvent, "id" | "title">): CalEvent {
   return {
     sourceId: "src-work",
@@ -77,23 +60,30 @@ function event(p: Partial<CalEvent> & Pick<CalEvent, "id" | "title">): CalEvent 
 describe("daemon e2e over the socket", () => {
   let dir: string;
   let familyPath: string;
-  let rulesPath: string;
   let cache: Cache;
+  let rules: RuleStore;
   let server: SocketServer;
   let socketPath: string;
   let config: LoadedConfig;
   let refresher: Refresher;
+  let standupRuleId: string;
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), "cango-e2e-"));
     familyPath = join(dir, "family.yaml");
-    rulesPath = join(dir, "rules.yaml");
     socketPath = join(dir, "cango.sock");
     writeFileSync(familyPath, FAMILY_YAML);
-    writeFileSync(rulesPath, RULES_SOFT);
 
-    config = await loadConfig(familyPath, rulesPath);
+    config = await loadConfig(familyPath);
     cache = new Cache(":memory:");
+    rules = new RuleStore(":memory:");
+    // Mirror main.ts: seed attendance edges, then add a soft standup rule.
+    rules.seedFromAttendance(config.attendanceSeed);
+    standupRuleId = rules.create({
+      match: { titleRegex: "(?i)standup" },
+      role: "soft",
+      reason: "optional standup",
+    }).id!;
     refresher = new Refresher(cache, config, { now: () => Date.now() });
 
     // Seed events directly — no network in e2e.
@@ -120,9 +110,10 @@ describe("daemon e2e over the socket", () => {
     const ctx: RpcContext = {
       cache,
       getConfig: () => config,
+      rules,
       refresher,
       reload: async () => {
-        config = await loadConfig(familyPath, rulesPath);
+        config = await loadConfig(familyPath);
         refresher.setConfig(config);
         cache.clearResolvedCache();
       },
@@ -133,6 +124,7 @@ describe("daemon e2e over the socket", () => {
   afterEach(() => {
     server.stop();
     cache.close();
+    rules.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -166,7 +158,7 @@ describe("daemon e2e over the socket", () => {
     expect(res.verdict).toBe("soft_conflict");
   });
 
-  test("attendance ATTENDS makes the club training a hard conflict for the kid", async () => {
+  test("seeded ATTENDS rule makes the club training a hard conflict for the kid", async () => {
     const res = (await rpcCall(socketPath, "checkAvailability", {
       start: "2026-06-01T15:30:00Z",
       end: "2026-06-01T18:00:00Z",
@@ -299,8 +291,8 @@ describe("daemon e2e over the socket", () => {
     expect(page2.truncated).toBe(false);
   });
 
-  test("reloadConfig hot-swaps rules and changes the verdict", async () => {
-    // Standup is soft under RULES_SOFT.
+  test("amendRule live-changes a verdict (and invalidates the resolved cache)", async () => {
+    // Standup is soft as seeded.
     let res = (await rpcCall(socketPath, "checkAvailability", {
       start: "2026-06-01T13:30:00Z",
       end: "2026-06-01T15:00:00Z",
@@ -308,9 +300,8 @@ describe("daemon e2e over the socket", () => {
     })) as { verdict: string };
     expect(res.verdict).toBe("soft_conflict");
 
-    // Swap rules on disk, reload.
-    writeFileSync(rulesPath, RULES_HARD);
-    await rpcCall(socketPath, "reloadConfig");
+    // Promote the standup rule to hard via the mutation RPC.
+    await rpcCall(socketPath, "amendRule", { id: standupRuleId, role: "hard" });
 
     res = (await rpcCall(socketPath, "checkAvailability", {
       start: "2026-06-01T13:30:00Z",
@@ -318,6 +309,54 @@ describe("daemon e2e over the socket", () => {
       people: ["p-me"],
     })) as { verdict: string };
     expect(res.verdict).toBe("hard_conflict");
+  });
+
+  test("listRules / createRule / forget via retractRule round-trip", async () => {
+    const before = (await rpcCall(socketPath, "listRules")) as { rules: Array<{ id: string }> };
+    const created = (await rpcCall(socketPath, "createRule", {
+      match: { title_regex: "(?i)lunch" },
+      role: "info",
+      reason: "lunch is not a meeting",
+    })) as { rule: { id: string; role: string; effect: string } };
+    expect(created.rule.role).toBe("info");
+    expect(created.rule.effect).toBe("self");
+
+    const after = (await rpcCall(socketPath, "listRules")) as { rules: Array<{ id: string }> };
+    expect(after.rules.length).toBe(before.rules.length + 1);
+
+    await rpcCall(socketPath, "retractRule", { id: created.rule.id });
+    const active = (await rpcCall(socketPath, "listRules")) as { rules: Array<{ id: string }> };
+    expect(active.rules.find((r) => r.id === created.rule.id)).toBeUndefined();
+    const all = (await rpcCall(socketPath, "listRules", { include_retracted: true })) as {
+      rules: Array<{ id: string }>;
+    };
+    expect(all.rules.find((r) => r.id === created.rule.id)).toBeDefined();
+  });
+
+  test("OOO mask demotes a same-source meeting to free", async () => {
+    // Add a vacation marker on src-work spanning 1 June, and a mask rule.
+    cache.replaceSourceEvents("src-work", [
+      event({
+        id: "vac",
+        title: "Vacation",
+        allDay: true,
+        start: new Date("2026-06-01T00:00:00Z"),
+        end: new Date("2026-06-02T00:00:00Z"),
+      }),
+      event({ id: "mtg", title: "Sprint review" }),
+    ]);
+    await rpcCall(socketPath, "createRule", {
+      match: { source_id: "src-work", title_regex: "(?i)vacation" },
+      role: "info",
+      effect: "mask",
+      reason: "out of office",
+    });
+    const res = (await rpcCall(socketPath, "checkAvailability", {
+      start: "2026-06-01T09:00:00Z",
+      end: "2026-06-01T12:00:00Z",
+      people: ["p-me"],
+    })) as { verdict: string };
+    expect(res.verdict).toBe("free");
   });
 
   test("unknown method returns an RPC error", async () => {

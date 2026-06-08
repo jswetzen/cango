@@ -24,3 +24,6 @@ ok-design-the-calendar-vivid-honey.md
 # (Deployed copies are rendered from mikro-iac's secrets.auto.tfvars.)
 /family.yaml
 /rules.yaml
+
+# Local dev/test drivers (direct CalDAV pokes, e2e create) — may embed creds.
+packages/*/scripts/
