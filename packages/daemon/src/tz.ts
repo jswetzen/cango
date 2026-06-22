@@ -96,6 +96,21 @@ export function zonedDayIndex(date: Date, tz: string): number {
   );
 }
 
+/**
+ * UTC-midnight instant of the wall-clock *date* of `date` as seen in `tz`.
+ *
+ * All-day events are date-only (`VALUE=DATE`): the CalDAV adapter takes the
+ * calendar date from the instant's UTC fields. But `parseInZone` puts a bare
+ * date on tz-local midnight (e.g. 2026-07-01 in +02:00 → 2026-06-30T22:00Z),
+ * whose UTC date is the day *before* — the off-by-one all-day bug. Re-anchoring
+ * to UTC midnight of the tz-local date makes the written `VALUE=DATE` name the
+ * intended day. Idempotent for instants already at UTC midnight.
+ */
+export function zonedDateOnlyUtc(date: Date, tz: string): Date {
+  const p = zonedParts(date, tz);
+  return new Date(Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day)));
+}
+
 // Explicit offset/Z already present on the time portion (e.g. `...T13:00:00Z` or
 // `...+02:00`); such inputs are unambiguous and parsed as-is.
 const HAS_OFFSET = /([Zz]|[+-]\d{2}:?\d{2})$/;

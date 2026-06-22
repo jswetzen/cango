@@ -16,7 +16,7 @@ import { ruleEffectSchema, ruleMatchSchema, ruleRoleSchema, toRuleMatch } from "
 import type { LoadedConfig } from "./config.ts";
 import type { Refresher } from "./cron.ts";
 import type { RuleStore } from "./ruleStore.ts";
-import { formatInZone, parseInZone, zonedDayIndex } from "./tz.ts";
+import { formatInZone, parseInZone, zonedDateOnlyUtc, zonedDayIndex } from "./tz.ts";
 
 export interface RpcContext {
   cache: Cache;
@@ -237,12 +237,18 @@ export const methods: Record<string, Handler> = {
     if (conn.kind !== "caldav" || !conn.writable) {
       throw new RpcError(-32005, `source not writable: ${p.source_id}`);
     }
+    // All-day events are date-only: the CalDAV adapter writes `VALUE=DATE` from
+    // the instant's UTC calendar date. `parseInZone` placed the bare start/end
+    // on tz-local midnight, whose UTC date is the day before for positive-offset
+    // zones — so re-anchor to UTC midnight of the tz-local date first.
+    const start = p.all_day ? zonedDateOnlyUtc(p.start, tz) : p.start;
+    const end = p.all_day ? zonedDateOnlyUtc(p.end, tz) : p.end;
     // The refresher owns the write + cache-refresh, using the same injected
     // adapters as fetching so listEvents/checkAvailability see it immediately.
     const uid = await ctx.refresher.createEvent(conn, {
       title: p.title,
-      start: p.start,
-      end: p.end,
+      start,
+      end,
       allDay: p.all_day,
     });
     const event = findEventById(ctx, uid);
