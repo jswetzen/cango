@@ -17,12 +17,27 @@ people:
   - id: p-me
     name: Me
     sourceIds: [src-work, src-personal]
+    # Optional: addresses used to match this person against an event's ATTENDEE
+    # props (e.g. when create_event writes attendees, or an invite lists them).
+    # A person with no email is simply never ATTENDEE-matched — they can still
+    # be an occupant via a source default or a fan-out rule. The kids' addresses
+    # don't have to be real mailboxes; they just have to match what cango writes.
+    emails: [me@example.com]
   - id: p-wife
     name: Wife
     sourceIds: [src-wife-work]
+    emails: [wife@example.com]
   - id: p-kid
     name: Kid
     sourceIds: [src-football]
+
+# Named sets of people, so occupancy can say "family" instead of listing every
+# id. Members may be people or other groups (expanded, cycle-guarded). Used by a
+# source's `defaultOccupants` and by fan-out rules (effect: fanout).
+groups:
+  - id: family
+    name: Everyone
+    memberIds: [p-me, p-wife, p-kid]
 
 organizations:
   - id: org-football
@@ -74,6 +89,24 @@ sources:
     ownerId: p-kid
     defaultRole: info
     url: https://football.example.com/team-a.ics
+
+  # A shared *family* calendar: every event on it occupies the whole household,
+  # not just the owner. `defaultOccupants` names the people (or a group) an
+  # event here normally occupies; omit it and the baseline is just [ownerId]
+  # (the default for every source above). For one-off "include my wife on this
+  # event" cases use create_event(occupants=[...]); for recurring household
+  # patterns on someone else's calendar use a fan-out rule (effect: fanout).
+  - id: src-family
+    kind: caldav
+    ownedBy: person
+    ownerId: p-me
+    defaultRole: soft
+    defaultOccupants: [family]
+    serverUrl: https://caldav.example.com/
+    username: me@example.com
+    password: ${CANGO_WORK_PASSWORD}
+    calendarName: Family
+    writable: true
 
 # DEPRECATED — attendance edges are no longer a live config layer. On the
 # daemon's first run these are seeded ONCE into the durable rule store

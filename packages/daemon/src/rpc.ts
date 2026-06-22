@@ -1,7 +1,9 @@
 import {
+  applyFanout,
   applyMasks,
   checkAvailability,
   compileRegex,
+  expandGroups,
   explainEvent,
   findFreeSlots,
   resolveRole,
@@ -90,6 +92,9 @@ const createEventParams = (tz: string) =>
       start: isoDate(tz),
       end: isoDate(tz),
       all_day: z.boolean().default(false),
+      // Person/group ids who occupy this event. Each person with a known email
+      // gets an ATTENDEE line; those without are returned in `unwritten_occupants`.
+      occupants: z.array(z.string()).optional(),
     })
     .refine((p) => p.end > p.start, { message: "end must be after start" });
 
@@ -100,6 +105,7 @@ const createRuleParams = z.object({
   match: ruleMatchSchema,
   role: ruleRoleSchema,
   effect: ruleEffectSchema.default("self"),
+  occupants: z.array(z.string()).optional(),
   reason: z.string().min(1).max(500),
 });
 
@@ -108,6 +114,7 @@ const amendRuleParams = z.object({
   match: ruleMatchSchema.optional(),
   role: ruleRoleSchema.optional(),
   effect: ruleEffectSchema.optional(),
+  occupants: z.array(z.string()).optional(),
   reason: z.string().min(1).max(500).optional(),
 });
 
@@ -127,7 +134,12 @@ export const methods: Record<string, Handler> = {
     const tz = config.settings.timezone;
     const p = checkParams(tz).parse(raw);
     const people = selectPeople(config, p.people);
-    const events = ctx.cache.eventsInWindow(p.start, p.end, p.people);
+    const events = ctx.cache.eventsInWindow(
+      p.start,
+      p.end,
+      p.people,
+      occupancyCanFanOut(ctx),
+    );
     const result = checkAvailability({
       window: { start: p.start, end: p.end },
       people,
@@ -150,7 +162,12 @@ export const methods: Record<string, Handler> = {
     const tz = config.settings.timezone;
     const p = freeSlotParams(tz).parse(raw);
     const people = selectPeople(config, p.people);
-    const events = ctx.cache.eventsInWindow(p.between.start, p.between.end, p.people);
+    const events = ctx.cache.eventsInWindow(
+      p.between.start,
+      p.between.end,
+      p.people,
+      occupancyCanFanOut(ctx),
+    );
     const slots = findFreeSlots({
       range: { start: p.between.start, end: p.between.end },
       duration: p.duration_minutes,
@@ -169,17 +186,28 @@ export const methods: Record<string, Handler> = {
     const config = ctx.getConfig();
     const tz = config.settings.timezone;
     const p = listEventsParams(tz).parse(raw);
-    const events = ctx.cache.eventsInWindow(p.start, p.end, p.people);
+    const events = ctx.cache.eventsInWindow(p.start, p.end, p.people, occupancyCanFanOut(ctx));
     const exclude = p.exclude_roles ? new Set(p.exclude_roles) : null;
     const active = ctx.rules.active();
     const rulesVersion = ctx.rules.version();
-    // Per-event resolution is cached; out-of-office masking is a cross-event
-    // post-pass applied on top of the cached results.
+    // Per-event resolution is cached; fan-out and out-of-office masking are
+    // cross-event post-passes applied on top of the cached results, in the same
+    // order as the availability consumers (fanout, then mask).
     const masked = applyMasks(
-      events.map((e) => resolveCached(ctx, e, active, rulesVersion)),
+      applyFanout(
+        events.map((e) => resolveCached(ctx, e, active, rulesVersion)),
+        active,
+        config.family,
+      ),
       active,
     );
-    const resolved = masked.filter((r) => !exclude || !exclude.has(r.resolvedRole));
+    // When people were requested but fan-out forced us to drop the SQL person
+    // filter, narrow precisely now on the resolved occupant set.
+    const wanted = p.people && p.people.length > 0 ? new Set(p.people) : null;
+    const peopleFiltered = wanted
+      ? masked.filter((r) => r.occupants.some((o) => wanted.has(o.personId)))
+      : masked;
+    const resolved = peopleFiltered.filter((r) => !exclude || !exclude.has(r.resolvedRole));
     const total = resolved.length;
     const page = resolved.slice(p.offset, p.offset + p.limit);
     return withStatus(ctx, {
@@ -237,12 +265,42 @@ export const methods: Record<string, Handler> = {
     if (conn.kind !== "caldav" || !conn.writable) {
       throw new RpcError(-32005, `source not writable: ${p.source_id}`);
     }
+    for (const id of p.occupants ?? []) {
+      if (!isKnownOccupant(config, id)) {
+        throw new RpcError(-32602, `unknown person/group in occupants: ${id}`);
+      }
+    }
     // All-day events are date-only: the CalDAV adapter writes `VALUE=DATE` from
     // the instant's UTC calendar date. `parseInZone` placed the bare start/end
     // on tz-local midnight, whose UTC date is the day before for positive-offset
     // zones — so re-anchor to UTC midnight of the tz-local date first.
     const start = p.all_day ? zonedDateOnlyUtc(p.start, tz) : p.start;
     const end = p.all_day ? zonedDateOnlyUtc(p.end, tz) : p.end;
+
+    // Resolve occupant ids → ATTENDEE lines. Group-expand, then split into
+    // people we can write (a known email) and those we can't — the latter are
+    // reported back so the caller can add an email or a fanout rule instead of
+    // silently losing them. The owner is implicit (it's their calendar), so
+    // don't write the owner as an ATTENDEE.
+    const ownerId = config.personIdForSource(p.source_id);
+    const occupantIds = p.occupants
+      ? expandGroups(p.occupants, config.family).filter((id) => id !== ownerId)
+      : [];
+    const peopleById = new Map(config.family.people.map((pp) => [pp.id, pp]));
+    const attendees: { name: string; email: string }[] = [];
+    const unwritten: string[] = [];
+    const attendeeIds: string[] = [];
+    for (const id of occupantIds) {
+      const person = peopleById.get(id);
+      const email = person?.emails?.[0];
+      if (person && email) {
+        attendees.push({ name: person.name, email });
+        attendeeIds.push(id);
+      } else {
+        unwritten.push(id);
+      }
+    }
+
     // The refresher owns the write + cache-refresh, using the same injected
     // adapters as fetching so listEvents/checkAvailability see it immediately.
     const uid = await ctx.refresher.createEvent(conn, {
@@ -250,6 +308,12 @@ export const methods: Record<string, Handler> = {
       start,
       end,
       allDay: p.all_day,
+      ...(attendees.length > 0
+        ? {
+            attendees,
+            ...(conn.selfEmail !== undefined ? { organizerEmail: conn.selfEmail } : {}),
+          }
+        : {}),
     });
     const event = findEventById(ctx, uid);
     const resolvedEvent = event
@@ -257,6 +321,7 @@ export const methods: Record<string, Handler> = {
       : null;
     return withStatus(ctx, {
       event: resolvedEvent ? serializeResolved(resolvedEvent, tz) : { id: uid },
+      ...(unwritten.length > 0 ? { unwritten_occupants: unwritten } : {}),
     });
   },
 
@@ -273,10 +338,12 @@ export const methods: Record<string, Handler> = {
     const p = createRuleParams.parse(raw);
     const match = toRuleMatch(p.match);
     validateRuleMatch(config, match);
+    validateOccupants(config, p.effect, p.occupants);
     const rule = ctx.rules.create({
       match,
       role: p.role,
       effect: p.effect,
+      ...(p.occupants !== undefined ? { occupants: p.occupants } : {}),
       reason: p.reason,
     });
     ctx.cache.clearResolvedCache();
@@ -289,12 +356,19 @@ export const methods: Record<string, Handler> = {
     const p = amendRuleParams.parse(raw);
     const match = p.match !== undefined ? toRuleMatch(p.match) : undefined;
     if (match) validateRuleMatch(config, match);
+    // An empty occupants array is the "clear it" signal on amend; only a
+    // non-empty list is validated (and only fanout rules may carry one).
+    if (p.occupants !== undefined && p.occupants.length > 0) {
+      const effect = p.effect ?? ctx.rules.get(p.id)?.effect ?? "self";
+      validateOccupants(config, effect, p.occupants);
+    }
     let rule;
     try {
       rule = ctx.rules.amend(p.id, {
         ...(match !== undefined ? { match } : {}),
         ...(p.role !== undefined ? { role: p.role } : {}),
         ...(p.effect !== undefined ? { effect: p.effect } : {}),
+        ...(p.occupants !== undefined ? { occupants: p.occupants } : {}),
         ...(p.reason !== undefined ? { reason: p.reason } : {}),
       });
     } catch (err) {
@@ -384,6 +458,34 @@ function validateRuleMatch(config: LoadedConfig, match: RuleMatch): void {
   }
 }
 
+/** A person or group id known to the family graph — the universe of valid
+ * occupant references (fanout rules, createEvent occupants, defaultOccupants). */
+function isKnownOccupant(config: LoadedConfig, id: string): boolean {
+  return (
+    config.family.people.some((p) => p.id === id) ||
+    (config.family.groups ?? []).some((g) => g.id === id)
+  );
+}
+
+function validateOccupants(
+  config: LoadedConfig,
+  effect: string | undefined,
+  occupants: string[] | undefined,
+): void {
+  if (occupants === undefined) return;
+  if ((effect ?? "self") !== "fanout") {
+    throw new RpcError(-32602, "occupants are only valid on a fanout-effect rule");
+  }
+  if (occupants.length === 0) {
+    throw new RpcError(-32602, "a fanout rule needs at least one occupant");
+  }
+  for (const id of occupants) {
+    if (!isKnownOccupant(config, id)) {
+      throw new RpcError(-32602, `unknown person/group in occupants: ${id}`);
+    }
+  }
+}
+
 function serializeMatch(m: RuleMatch): Record<string, unknown> {
   return {
     ...(m.personId !== undefined ? { person_id: m.personId } : {}),
@@ -401,6 +503,7 @@ function serializeRule(r: Rule, tz: string) {
     match: serializeMatch(r.match),
     role: r.role,
     effect: r.effect ?? "self",
+    ...(r.occupants !== undefined ? { occupants: r.occupants } : {}),
     reason: r.reason,
     ...(r.createdAt !== undefined ? { created_at: formatInZone(new Date(r.createdAt), tz) } : {}),
     ...(r.updatedAt !== undefined ? { updated_at: formatInZone(new Date(r.updatedAt), tz) } : {}),
@@ -408,6 +511,35 @@ function serializeRule(r: Rule, tz: string) {
       ? { retracted_at: formatInZone(new Date(r.retractedAt), tz) }
       : {}),
   };
+}
+
+/**
+ * Can occupancy attach a requested person to an event whose stored
+ * owner/`attendee_ids` don't name them? If so the cache's SQL person filter
+ * must be dropped (and narrowing done post-resolution on the resolved
+ * `occupants`), because that filter only keys off the row's `person_id` and
+ * `attendee_ids_json`. Three occupancy sources reach beyond those columns:
+ *   - a `fanout` rule (targets live in the rule store, not on the row);
+ *   - a source's `defaultOccupants` set to anything other than its owner (the
+ *     shared-family-calendar case — config-derived, not on the row);
+ *   - ATTENDEE matches that resolve to a *different* person than the owner —
+ *     only possible if more than one person carries an email, so the resolver
+ *     can map an attendee to a non-owner. (With at most one emailed person, any
+ *     match is that person on their own calendar, already covered by person_id.)
+ * Any of these makes the SQL pre-filter unsafe to trust, so we widen.
+ */
+function occupancyCanFanOut(ctx: RpcContext): boolean {
+  if (ctx.rules.active().some((r) => r.effect === "fanout")) return true;
+  const family = ctx.getConfig().family;
+  const ownerBySource = new Map(family.sources.map((s) => [s.id, s.ownerId]));
+  const sharedSource = family.sources.some(
+    (s) =>
+      s.defaultOccupants !== undefined &&
+      s.defaultOccupants.some((id) => id !== ownerBySource.get(s.id)),
+  );
+  if (sharedSource) return true;
+  const emailedPeople = family.people.filter((p) => (p.emails?.length ?? 0) > 0);
+  return emailedPeople.length > 1;
 }
 
 function selectPeople(config: LoadedConfig, ids?: string[]) {
@@ -454,6 +586,17 @@ function eventDaySpan(e: ResolvedEvent, tz: string): number {
   return Math.max(1, zonedDayIndex(endRef, tz) - zonedDayIndex(e.start, tz) + 1);
 }
 
+/** True when an event occupies only its owner at its own role — the common
+ * case, where the `occupants` array adds nothing over `person_id`/`resolved_role`
+ * and is omitted from output to stay compact. */
+function isPlainOccupancy(e: ResolvedEvent): boolean {
+  return (
+    e.occupants.length === 1 &&
+    e.occupants[0]!.personId === e.personId &&
+    e.occupants[0]!.role === e.resolvedRole
+  );
+}
+
 // `extended` defaults true and `daySpan` false so callers other than listEvents
 // (checkAvailability/explainEvent/createEvent) get byte-identical output.
 function serializeResolved(
@@ -473,6 +616,12 @@ function serializeResolved(
     end: formatInZone(e.end, tz),
     all_day: e.allDay,
     resolved_role: e.resolvedRole,
+    // Occupancy: only surface it when the event occupies someone other than its
+    // owner at its base role (a household / fanned event). A plain single-owner
+    // event carries no new information here, so it stays compact.
+    ...(isPlainOccupancy(e)
+      ? {}
+      : { occupants: e.occupants.map((o) => ({ person_id: o.personId, role: o.role })) }),
     // In compact mode a plain source-default verdict carries no information, so
     // drop its boilerplate; keep it whenever a rule/attendance/etc. decided it.
     ...(!extended && e.resolvedBy === "default"

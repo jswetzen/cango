@@ -3,24 +3,25 @@ import { explainEvent } from "../src/explainEvent.js";
 import { event, makeFamily, rule } from "./fixtures.js";
 
 describe("explainEvent trace", () => {
-  it("traces every layer up to and including the deciding one, plus mask", () => {
+  it("traces every layer up to and including the deciding one, plus fanout + mask", () => {
     const result = explainEvent(event({ id: "e1" }), makeFamily(), []);
     expect(result.trace.map((t) => t.layer)).toEqual([
       "structural",
       "rule",
       "default",
+      "fanout",
       "mask",
     ]);
     expect(result.resolved.resolvedBy).toBe("default");
   });
 
-  it("structural decision short-circuits the per-event layers; mask still reports", () => {
+  it("structural decision short-circuits the per-event layers; fanout + mask still report", () => {
     const result = explainEvent(
       event({ id: "e2", rsvpStatus: "declined" }),
       makeFamily(),
       [],
     );
-    expect(result.trace.map((t) => t.layer)).toEqual(["structural", "mask"]);
+    expect(result.trace.map((t) => t.layer)).toEqual(["structural", "fanout", "mask"]);
     expect(result.trace[0]!.outcome).toMatch(/info \(structural\)/);
     expect(result.trace.at(-1)!.outcome).toMatch(/no out-of-office mask/);
     expect(result.resolved.resolvedBy).toBe("structural");
@@ -35,6 +36,7 @@ describe("explainEvent trace", () => {
     expect(result.trace.map((t) => t.layer)).toEqual([
       "structural",
       "rule",
+      "fanout",
       "mask",
     ]);
     const ruleEntry = result.trace.find((t) => t.layer === "rule");

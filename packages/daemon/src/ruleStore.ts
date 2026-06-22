@@ -2,13 +2,15 @@ import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { Rule, RuleEffect, RuleMatch, RuleRole } from "@cango/core";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /** What a caller supplies to create a rule. */
 export interface RuleInput {
   match: RuleMatch;
   role: RuleRole;
   effect?: RuleEffect;
+  /** For `fanout` rules: person/group ids added to a matched event's occupants. */
+  occupants?: string[];
   reason: string;
 }
 
@@ -17,6 +19,7 @@ export interface RulePatch {
   match?: RuleMatch;
   role?: RuleRole;
   effect?: RuleEffect;
+  occupants?: string[];
   reason?: string;
 }
 
@@ -36,6 +39,7 @@ interface RuleRow {
   match_json: string;
   role: string;
   effect: string;
+  occupants_json: string | null;
   reason: string;
   created_at: number;
   updated_at: number;
@@ -61,21 +65,31 @@ export class RuleStore {
   private migrate(): void {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS rules (
-        id           TEXT PRIMARY KEY,
-        match_json   TEXT NOT NULL,
-        role         TEXT NOT NULL,
-        effect       TEXT NOT NULL DEFAULT 'self',
-        reason       TEXT NOT NULL,
-        created_at   INTEGER NOT NULL,
-        updated_at   INTEGER NOT NULL,
-        retracted_at INTEGER
+        id            TEXT PRIMARY KEY,
+        match_json    TEXT NOT NULL,
+        role          TEXT NOT NULL,
+        effect        TEXT NOT NULL DEFAULT 'self',
+        occupants_json TEXT,
+        reason        TEXT NOT NULL,
+        created_at    INTEGER NOT NULL,
+        updated_at    INTEGER NOT NULL,
+        retracted_at  INTEGER
       )
     `);
     this.db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
-    if (this.getMeta("schema_version") === null) {
+
+    // Stepwise migrations. A fresh db (no schema_version) is created at the
+    // latest version; an existing v1 db is upgraded in place.
+    const current = Number(this.getMeta("schema_version") ?? "0");
+    if (current === 0) {
       this.setMeta("schema_version", String(SCHEMA_VERSION));
     }
-    // Future migrations: read schema_version, apply stepwise, bump it.
+    // v1 → v2: add occupants_json for `fanout` rules. Existing rows read null
+    // (no fan-out), preserved as an empty occupant list by rowToRule.
+    if (current >= 1 && current < 2) {
+      this.db.run(`ALTER TABLE rules ADD COLUMN occupants_json TEXT`);
+      this.setMeta("schema_version", "2");
+    }
   }
 
   close(): void {
@@ -121,9 +135,19 @@ export class RuleStore {
   create(input: RuleInput, now = Date.now()): Rule {
     const id = randomUUID();
     this.db.run(
-      `INSERT INTO rules (id, match_json, role, effect, reason, created_at, updated_at, retracted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
-      [id, JSON.stringify(input.match), input.role, input.effect ?? "self", input.reason, now, now],
+      `INSERT INTO rules
+         (id, match_json, role, effect, occupants_json, reason, created_at, updated_at, retracted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      [
+        id,
+        JSON.stringify(input.match),
+        input.role,
+        input.effect ?? "self",
+        input.occupants && input.occupants.length > 0 ? JSON.stringify(input.occupants) : null,
+        input.reason,
+        now,
+        now,
+      ],
     );
     return this.get(id)!;
   }
@@ -136,10 +160,17 @@ export class RuleStore {
     const match = patch.match !== undefined ? JSON.stringify(patch.match) : existing.match_json;
     const role = patch.role ?? existing.role;
     const effect = patch.effect ?? existing.effect;
+    const occupants =
+      patch.occupants !== undefined
+        ? patch.occupants.length > 0
+          ? JSON.stringify(patch.occupants)
+          : null
+        : existing.occupants_json;
     const reason = patch.reason ?? existing.reason;
     this.db.run(
-      `UPDATE rules SET match_json = ?, role = ?, effect = ?, reason = ?, updated_at = ? WHERE id = ?`,
-      [match, role, effect, reason, now, id],
+      `UPDATE rules SET match_json = ?, role = ?, effect = ?, occupants_json = ?, reason = ?, updated_at = ?
+       WHERE id = ?`,
+      [match, role, effect, occupants, reason, now, id],
     );
     return this.get(id)!;
   }
@@ -196,6 +227,12 @@ function rowToRule(row: RuleRow): Rule {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+  if (row.occupants_json) {
+    const ids = JSON.parse(row.occupants_json) as unknown;
+    if (Array.isArray(ids) && ids.length > 0) {
+      rule.occupants = ids.filter((x): x is string => typeof x === "string");
+    }
+  }
   if (row.retracted_at !== null) rule.retractedAt = row.retracted_at;
   return rule;
 }

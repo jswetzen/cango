@@ -64,6 +64,58 @@ describe("Cache", () => {
     expect(mine.map((e) => e.id)).toEqual(["e1"]);
   });
 
+  test("eventsInWindow person filter also matches stored attendeeIds", () => {
+    cache.replaceSourceEvents("src-a", [
+      ev({ id: "e1", personId: "p-me" }),
+      // owned by me but the wife is an attendee — she should see it too.
+      ev({ id: "e2", personId: "p-me", attendeeIds: ["p-wife"] }),
+    ]);
+    const hers = cache.eventsInWindow(
+      new Date("2026-06-01T00:00:00Z"),
+      new Date("2026-06-02T00:00:00Z"),
+      ["p-wife"],
+    );
+    expect(hers.map((e) => e.id)).toEqual(["e2"]);
+  });
+
+  test("eventsInWindow drops the SQL person filter when fanout is active", () => {
+    cache.replaceSourceEvents("src-a", [
+      ev({ id: "e1", personId: "p-me" }),
+      ev({ id: "e2", personId: "p-wife" }),
+    ]);
+    // With fanoutActive=true, the person filter is skipped (core narrows later),
+    // so a p-kid query still returns every event for post-resolution filtering.
+    const all = cache.eventsInWindow(
+      new Date("2026-06-01T00:00:00Z"),
+      new Date("2026-06-02T00:00:00Z"),
+      ["p-kid"],
+      true,
+    );
+    expect(all.map((e) => e.id).sort()).toEqual(["e1", "e2"]);
+  });
+
+  test("person filter does not let a LIKE wildcard id over-match", () => {
+    // 'p_a' contains a SQL LIKE single-char wildcard; it must not match 'pXa'.
+    cache.replaceSourceEvents("src-a", [
+      ev({ id: "e1", personId: "owner", attendeeIds: ["pXa"] }),
+    ]);
+    const got = cache.eventsInWindow(
+      new Date("2026-06-01T00:00:00Z"),
+      new Date("2026-06-02T00:00:00Z"),
+      ["p_a"],
+    );
+    expect(got).toHaveLength(0);
+  });
+
+  test("attendeeIds round-trip through the cache", () => {
+    cache.replaceSourceEvents("src-a", [ev({ id: "e1", attendeeIds: ["p-wife", "p-kid"] })]);
+    const [got] = cache.eventsInWindow(
+      new Date("2026-06-01T00:00:00Z"),
+      new Date("2026-06-02T00:00:00Z"),
+    );
+    expect(got!.attendeeIds).toEqual(["p-wife", "p-kid"]);
+  });
+
   test("recentSeries groups by series", () => {
     cache.replaceSourceEvents("src-a", [
       ev({ id: "e1", seriesId: "s1", start: new Date("2026-06-01T10:00:00Z") }),
@@ -83,6 +135,7 @@ describe("Cache", () => {
       resolvedBy: "rule",
       resolvedReason: "test",
       ruleId: "r1",
+      occupants: [{ personId: "p-me", role: "soft" }],
     };
     cache.putResolved("famv1", "rulev1", resolved);
     expect(cache.getResolved("src-a", "e1", "famv1", "rulev1")?.resolvedRole).toBe("soft");
@@ -95,6 +148,7 @@ describe("Cache", () => {
       resolvedRole: "hard",
       resolvedBy: "default",
       resolvedReason: "x",
+      occupants: [{ personId: "p-me", role: "hard" }],
     };
     cache.putResolved("famv1", "rulev1", resolved);
     cache.replaceSourceEvents("src-a", [ev({ id: "e1" })]);

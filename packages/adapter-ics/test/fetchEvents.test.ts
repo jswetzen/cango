@@ -90,6 +90,29 @@ describe("@cango/adapter-ics fetchEvents", () => {
     expect(focus.attendeeCount).toBe(1);
   });
 
+  it("populates attendeeIds from ATTENDEE emails via the resolver", async () => {
+    // Map only known family emails; external attendees (bob@) resolve to nothing.
+    const resolveAttendeeIds = (emails: string[]) =>
+      emails.flatMap((e) => (e.toLowerCase() === "me@cango.test" ? ["p-me"] : []));
+    const events = await fetchEvents(
+      baseConfig({ resolveAttendeeIds }),
+      { start: new Date("2026-06-01T00:00:00Z"), end: new Date("2026-06-30T00:00:00Z") },
+      { fetcher: fixtureFetcher("with-rsvp.ics") },
+    );
+    const declined = events.find((e) => e.id === "invite-001@cango.test")!;
+    // me@ maps to p-me; bob@example.com is external and dropped.
+    expect(declined.attendeeIds).toEqual(["p-me"]);
+  });
+
+  it("leaves attendeeIds unset when no resolver is supplied", async () => {
+    const events = await fetchEvents(
+      baseConfig(),
+      { start: new Date("2026-06-01T00:00:00Z"), end: new Date("2026-06-30T00:00:00Z") },
+      { fetcher: fixtureFetcher("with-rsvp.ics") },
+    );
+    for (const e of events) expect(e.attendeeIds).toBeUndefined();
+  });
+
   it("omits rsvp/organizer fields when selfEmail not provided", async () => {
     const events = await fetchEvents(
       baseConfig(),

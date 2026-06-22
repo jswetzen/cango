@@ -14,6 +14,8 @@ export interface CalDavSourceConfig {
   username: string;
   password: string;
   resolvePersonId: (sourceId: string) => string;
+  /** Map ATTENDEE emails to known person ids; forwarded to the ICS parser. */
+  resolveAttendeeIds?: (emails: string[]) => string[];
   selfEmail?: string;
   calendarFilter?: (calendar: CalDavCalendarLike) => boolean;
   /**
@@ -50,11 +52,22 @@ export interface CalDavClientLike {
 }
 
 /** A new event to write. Only simple, non-recurring events are supported. */
+/** One attendee to write into the VEVENT — a display name and email. */
+export interface CreateEventAttendee {
+  name: string;
+  email: string;
+}
+
 export interface CreateEventInput {
   title: string;
   start: Date;
   end: Date;
   allDay: boolean;
+  /** ATTENDEE lines to emit (people with known emails). The daemon resolves
+   * occupant ids → emails; the adapter only serializes what it's given. */
+  attendees?: CreateEventAttendee[];
+  /** ORGANIZER email (the source's self address), emitted when attendees exist. */
+  organizerEmail?: string;
   /** Server-generated when omitted; never derive from untrusted input. */
   uid?: string;
 }
@@ -93,6 +106,9 @@ export async function fetchEvents(
           sourceId: config.sourceId,
           url: obj.url,
           resolvePersonId: config.resolvePersonId,
+          ...(config.resolveAttendeeIds !== undefined
+            ? { resolveAttendeeIds: config.resolveAttendeeIds }
+            : {}),
           ...(config.selfEmail !== undefined ? { selfEmail: config.selfEmail } : {}),
         },
         window,
@@ -168,6 +184,15 @@ function buildVevent(input: CreateEventInput, uid: string): string {
         ]
       : [`DTSTART:${formatUtc(input.start)}`, `DTEND:${formatUtc(input.end)}`]),
     `SUMMARY:${escapeText(input.title)}`,
+    // ORGANIZER/ATTENDEE: the CN is hostile text (escaped); the email is a
+    // mailto: URI value, validated by the daemon before it reaches here.
+    ...(input.attendees && input.attendees.length > 0 && input.organizerEmail
+      ? [`ORGANIZER:mailto:${input.organizerEmail}`]
+      : []),
+    ...(input.attendees ?? []).map(
+      (a) =>
+        `ATTENDEE;CN=${escapeText(a.name)};ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:${a.email}`,
+    ),
     "END:VEVENT",
     "END:VCALENDAR",
   ];

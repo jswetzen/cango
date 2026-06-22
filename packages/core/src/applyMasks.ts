@@ -1,4 +1,5 @@
 import { matchesRule } from "./resolveRole.js";
+import { roleRank } from "./types.js";
 import type { ResolvedEvent, Role, Rule } from "./types.js";
 
 /**
@@ -55,6 +56,11 @@ function rerole(ev: ResolvedEvent, role: Role, reason: string, ruleId?: string):
     resolvedRole: role,
     resolvedBy: "rule",
     resolvedReason: reason,
+    // Masking is a blanket demotion of the whole event ("I'm away — ignore
+    // what's on this calendar"), so every occupant drops to the masked role too;
+    // otherwise a fanned-in occupant would keep blocking a masked-out day. Only
+    // ever lowers (cap at the new role), matching the demotion intent.
+    occupants: ev.occupants.map((o) => (roleRank(o.role) > roleRank(role) ? { ...o, role } : o)),
     ...(ruleId !== undefined ? { ruleId } : {}),
   };
 }

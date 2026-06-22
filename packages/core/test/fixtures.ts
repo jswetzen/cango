@@ -1,4 +1,4 @@
-import type { CalEvent, FamilyGraph, Person, Rule, SourceRef } from "../src/types.js";
+import type { CalEvent, FamilyGraph, Group, Person, Rule, SourceRef } from "../src/types.js";
 
 export const sourceWorkHard: SourceRef = {
   id: "src-work",
@@ -39,11 +39,21 @@ export const kid: Person = {
   sources: [sourceKidClub],
 };
 
-export function makeFamily(extraSources: SourceRef[] = []): FamilyGraph {
+export const familyGroup: Group = {
+  id: "family",
+  name: "Everyone",
+  memberIds: ["p-me", "p-wife", "p-kid"],
+};
+
+export function makeFamily(
+  extraSources: SourceRef[] = [],
+  groups: Group[] = [],
+): FamilyGraph {
   return {
     people: [me, wife, kid],
     organizations: [],
     sources: [sourceWorkHard, sourceWifeWork, sourceKidClub, ...extraSources],
+    ...(groups.length > 0 ? { groups } : {}),
   };
 }
 

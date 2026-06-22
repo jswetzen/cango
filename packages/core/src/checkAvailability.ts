@@ -1,3 +1,4 @@
+import { applyFanout } from "./applyFanout.js";
 import { applyMasks } from "./applyMasks.js";
 import { resolveRole } from "./resolveRole.js";
 import type {
@@ -24,25 +25,33 @@ export function checkAvailability(
   let hasHard = false;
   let hasSoft = false;
 
-  // Resolve every event, then apply out-of-office masking across the set before
-  // tallying conflicts (a masked event becomes `info` and stops blocking).
+  // Resolve every event, fan out household occupancy, then apply out-of-office
+  // masking before tallying (fanout first so an OOO marker can still suppress a
+  // fanned event; a masked event becomes `info` and stops blocking).
   const resolvedAll = applyMasks(
-    events.map((ev) => resolveRole(ev, family, rules)),
+    applyFanout(
+      events.map((ev) => resolveRole(ev, family, rules)),
+      rules,
+      family,
+    ),
     rules,
   );
 
   for (const resolved of resolvedAll) {
-    const person = peopleById.get(resolved.personId);
-    if (!person) continue;
     const overlap = overlapMinutes(resolved, windowStart, windowEnd);
     if (overlap <= 0) continue;
 
-    if (resolved.resolvedRole === "info") continue;
-    if (resolved.resolvedRole === "conditional") continue;
-
-    conflicts.push({ person, event: resolved, overlapMinutes: overlap });
-    if (resolved.resolvedRole === "hard") hasHard = true;
-    else if (resolved.resolvedRole === "soft") hasSoft = true;
+    // An event may occupy several of the requested people, each at its own role
+    // (a household event is `hard` for the owner, `soft` for "might go" kids);
+    // emit one conflict row per requested occupant, tallied at *their* role.
+    for (const occupant of resolved.occupants) {
+      if (occupant.role === "info" || occupant.role === "conditional") continue;
+      const person = peopleById.get(occupant.personId);
+      if (!person) continue;
+      conflicts.push({ person, event: resolved, overlapMinutes: overlap });
+      if (occupant.role === "hard") hasHard = true;
+      else if (occupant.role === "soft") hasSoft = true;
+    }
   }
 
   const verdict: Verdict = hasHard

@@ -81,6 +81,7 @@ export class Refresher {
         window,
         this.config.personIdForSource,
         this.adapters,
+        this.config.resolveAttendeeIds,
       );
       this.cache.replaceSourceEvents(connection.sourceId, events, this.now());
       this.cache.markSuccess(connection.sourceId, this.now());

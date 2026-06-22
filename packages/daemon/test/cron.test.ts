@@ -20,6 +20,7 @@ function makeConfig(): LoadedConfig {
         writable: false,
       },
     ],
+    groups: [],
     attendance: [],
     settings: { refreshIntervalMinutes: 60, maxStaleHours: 6, timezone: "UTC" },
   });
@@ -28,6 +29,7 @@ function makeConfig(): LoadedConfig {
     connections,
     settings,
     personIdForSource: () => "p-me",
+    resolveAttendeeIds: () => [],
     familyVersion: "fv",
     attendanceSeed,
   };

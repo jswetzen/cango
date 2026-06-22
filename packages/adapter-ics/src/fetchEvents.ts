@@ -7,6 +7,10 @@ export interface IcsSourceConfig {
   sourceId: string;
   url: string;
   resolvePersonId: (sourceId: string) => string;
+  /** Map ATTENDEE emails to known person ids (unmatched/external are dropped).
+   * Optional: without it, events carry no `attendeeIds` and occupancy falls
+   * back to the source owner + fanout rules. */
+  resolveAttendeeIds?: (emails: string[]) => string[];
   selfEmail?: string;
 }
 
@@ -177,6 +181,7 @@ function assembleCalEvent(args: {
   const rsvp = extractRsvp(vevent, config.selfEmail);
   const organizerIsSelf = isOrganizerSelf(vevent, config.selfEmail);
   const attendeeCount = countAttendees(vevent);
+  const attendeeIds = resolveAttendeeIds(vevent, config);
   return {
     id,
     sourceId: config.sourceId,
@@ -190,6 +195,7 @@ function assembleCalEvent(args: {
     ...(rsvp !== undefined ? { rsvpStatus: rsvp } : {}),
     ...(organizerIsSelf !== undefined ? { organizerIsSelf } : {}),
     ...(attendeeCount !== undefined ? { attendeeCount } : {}),
+    ...(attendeeIds.length > 0 ? { attendeeIds } : {}),
     raw: vevent,
   };
 }
@@ -265,6 +271,20 @@ function isOrganizerSelf(vevent: VEvent, selfEmail?: string): boolean | undefine
 function countAttendees(vevent: VEvent): number | undefined {
   const attendees = normalizeAttendees(vevent);
   return attendees.length || undefined;
+}
+
+/** Map the event's ATTENDEE emails to known person ids via the config resolver.
+ * Returns [] when no resolver is supplied or nothing matches — occupancy then
+ * leans on the source owner + fanout rules. */
+function resolveAttendeeIds(vevent: VEvent, config: IcsSourceConfig): string[] {
+  if (!config.resolveAttendeeIds) return [];
+  const emails: string[] = [];
+  for (const att of normalizeAttendees(vevent)) {
+    const email = attendeeEmail(att);
+    if (email) emails.push(email);
+  }
+  if (emails.length === 0) return [];
+  return config.resolveAttendeeIds(emails);
 }
 
 function normalizeAttendees(vevent: VEvent): unknown[] {

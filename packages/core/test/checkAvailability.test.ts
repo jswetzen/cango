@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { checkAvailability } from "../src/checkAvailability.js";
-import { attendanceRule, event, kid, makeFamily, me, rule, wife } from "./fixtures.js";
+import {
+  attendanceRule,
+  event,
+  familyGroup,
+  kid,
+  makeFamily,
+  me,
+  rule,
+  wife,
+} from "./fixtures.js";
 
 const window = {
   start: new Date("2026-06-01T09:00:00Z"),
@@ -219,5 +228,66 @@ describe("checkAvailability verdicts", () => {
         rules: [],
       }),
     ).toThrow();
+  });
+});
+
+describe("checkAvailability household fan-out", () => {
+  // The literal task case: a camp lives on Johan's (=me) personal calendar but
+  // occupies the whole family. A check on a kid alone must surface it.
+  const camp = event({
+    id: "saras-lager",
+    sourceId: "src-work",
+    personId: "p-me",
+    title: "Saras läger",
+    seriesId: "lager-2026",
+  });
+  const fanout = rule({
+    match: { seriesId: "lager-2026" },
+    role: "soft",
+    effect: "fanout",
+    occupants: ["family"],
+    reason: "family may attend camp — confirm before booking over",
+  });
+
+  it("a kid-only check is FREE without a fanout rule (reproduces the gap)", () => {
+    const result = checkAvailability({
+      window,
+      people: [kid],
+      events: [camp],
+      family: makeFamily([], [familyGroup]),
+      rules: [],
+    });
+    expect(result.verdict).toBe("free");
+  });
+
+  it("a kid-only check surfaces the camp as soft once fanned out", () => {
+    const result = checkAvailability({
+      window,
+      people: [kid],
+      events: [camp],
+      family: makeFamily([], [familyGroup]),
+      rules: [fanout],
+    });
+    expect(result.verdict).toBe("soft_conflict");
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]!.person.id).toBe("p-kid");
+  });
+
+  it("emits one conflict row per requested occupant; hard for owner, soft for fanned kids", () => {
+    const result = checkAvailability({
+      window,
+      people: [me, wife, kid],
+      events: [camp],
+      family: makeFamily([], [familyGroup]),
+      rules: [fanout],
+    });
+    // The camp is on Johan's (=me) hard calendar, so it's a hard conflict for
+    // him; the fanned-in kids carry the rule's soft role. Overall: hard.
+    expect(result.verdict).toBe("hard_conflict");
+    expect(result.conflicts.map((c) => c.person.id).sort()).toEqual([
+      "p-kid",
+      "p-me",
+      "p-wife",
+    ]);
   });
 });

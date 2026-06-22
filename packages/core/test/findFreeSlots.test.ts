@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { findFreeSlots } from "../src/findFreeSlots.js";
-import { event, makeFamily, me } from "./fixtures.js";
+import { event, familyGroup, kid, makeFamily, me } from "./fixtures.js";
 
 describe("findFreeSlots", () => {
   const range = {
@@ -138,5 +138,45 @@ describe("findFreeSlots", () => {
       { start: new Date("2026-06-01T09:00:00Z"), end: new Date("2026-06-01T17:00:00Z") },
       { start: new Date("2026-06-02T09:00:00Z"), end: new Date("2026-06-02T17:00:00Z") },
     ]);
+  });
+});
+
+describe("findFreeSlots household fan-out", () => {
+  it("a hard fanned event blocks the occupant's slot", () => {
+    // Camp on me's calendar, fanned to the kid as hard. A free-slot search for
+    // the kid must treat the camp as busy even though it isn't on src-kid-club.
+    const camp = event({
+      id: "camp",
+      sourceId: "src-work",
+      personId: "p-me",
+      title: "Camp",
+      seriesId: "camp-1",
+      start: new Date("2026-06-01T12:00:00Z"),
+      end: new Date("2026-06-01T13:00:00Z"),
+    });
+    const slots = findFreeSlots({
+      range: {
+        start: new Date("2026-06-01T09:00:00Z"),
+        end: new Date("2026-06-01T17:00:00Z"),
+      },
+      duration: 60,
+      people: [kid],
+      events: [camp],
+      family: makeFamily([], [familyGroup]),
+      rules: [
+        {
+          match: { seriesId: "camp-1" },
+          role: "hard",
+          effect: "fanout",
+          occupants: ["family"],
+          reason: "whole family at camp",
+        },
+      ],
+    });
+    // The 12:00–13:00 camp must carve a hole out of the kid's day.
+    const coversCamp = slots.some(
+      (s) => s.start <= camp.start && s.end >= camp.end,
+    );
+    expect(coversCamp).toBe(false);
   });
 });

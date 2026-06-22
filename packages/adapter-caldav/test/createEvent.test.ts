@@ -89,6 +89,57 @@ describe("createEvent", () => {
     expect(ics).toContain("DTEND;VALUE=DATE:20260621");
   });
 
+  it("writes ATTENDEE and ORGANIZER lines and they round-trip as attendeeIds", async () => {
+    const { client, writes } = captureClient([{ url: "https://cal/1/" }]);
+    await createEvent(
+      baseConfig(),
+      timedInput({
+        uid: "u",
+        organizerEmail: "johan@cango.test",
+        attendees: [
+          { name: "Wife", email: "wife@cango.test" },
+          { name: "Eli, Jr.", email: "eli@cango.test" }, // comma must be escaped in CN
+        ],
+      }),
+      { client },
+    );
+    // Unfold RFC-5545 line continuations (CRLF + space) before matching, since
+    // long ATTENDEE lines wrap at 75 octets.
+    const ics = writes[0]!.iCalString;
+    const unfolded = ics.replace(/\r\n[ \t]/g, "");
+    expect(unfolded).toContain("ORGANIZER:mailto:johan@cango.test");
+    expect(unfolded).toContain(
+      "ATTENDEE;CN=Wife;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:wife@cango.test",
+    );
+    expect(unfolded).toContain("CN=Eli\\, Jr."); // escaped comma in CN
+
+    // Round-trip through the ICS parser with an email→person resolver.
+    const events = parseIcs(
+      ics,
+      {
+        sourceId: "src-caldav",
+        url: "obj.ics",
+        resolvePersonId: () => "p-johan",
+        resolveAttendeeIds: (emails) =>
+          emails.flatMap((e) =>
+            e === "wife@cango.test" ? ["p-wife"] : e === "eli@cango.test" ? ["p-eli"] : [],
+          ),
+      },
+      { start: new Date("2026-06-16T10:00:00Z"), end: new Date("2026-06-16T13:00:00Z") },
+    );
+    expect(events[0]!.attendeeIds).toEqual(["p-wife", "p-eli"]);
+  });
+
+  it("emits no ORGANIZER/ATTENDEE lines when there are no attendees", async () => {
+    const { client, writes } = captureClient([{ url: "https://cal/1/" }]);
+    await createEvent(baseConfig(), timedInput({ uid: "u", organizerEmail: "johan@cango.test" }), {
+      client,
+    });
+    const ics = writes[0]!.iCalString;
+    expect(ics).not.toContain("ATTENDEE");
+    expect(ics).not.toContain("ORGANIZER");
+  });
+
   it("selects the calendar matching calendarFilter", async () => {
     const { client, writes } = captureClient([
       { url: "https://cal/work/", displayName: "Work" },

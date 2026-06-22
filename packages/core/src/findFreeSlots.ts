@@ -1,3 +1,4 @@
+import { applyFanout } from "./applyFanout.js";
 import { applyMasks } from "./applyMasks.js";
 import { resolveRole } from "./resolveRole.js";
 import type { FindFreeSlotsInput, FreeSlot } from "./types.js";
@@ -26,17 +27,26 @@ export function findFreeSlots(input: FindFreeSlotsInput): FreeSlot[] {
     ? expandWorkingHours(rangeStart, rangeEnd, workingHours)
     : [{ start: rangeStart, end: rangeEnd }];
 
-  // Resolve + mask the whole set first; only `hard` events for the requested
-  // people block a slot (a masked-out work meeting no longer does).
+  // Resolve, fan out household occupancy, then mask; only `hard` events that
+  // occupy a requested person block a slot (a masked-out work meeting no longer
+  // does).
   const resolvedAll = applyMasks(
-    events.map((ev) => resolveRole(ev, family, rules)),
+    applyFanout(
+      events.map((ev) => resolveRole(ev, family, rules)),
+      rules,
+      family,
+    ),
     rules,
   );
 
   const busy: Interval[] = [];
   for (const resolved of resolvedAll) {
-    if (!peopleIds.has(resolved.personId)) continue;
-    if (resolved.resolvedRole !== "hard") continue;
+    // A slot is blocked only if the event is `hard` for one of the requested
+    // people. A "might go" (soft) fan-out doesn't carve out free time.
+    const blocks = resolved.occupants.some(
+      (o) => o.role === "hard" && peopleIds.has(o.personId),
+    );
+    if (!blocks) continue;
     const start = Math.max(resolved.start.getTime(), rangeStart);
     const end = Math.min(resolved.end.getTime(), rangeEnd);
     if (end <= start) continue;

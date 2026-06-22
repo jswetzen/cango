@@ -30,6 +30,10 @@ const sourceSchema = z
     calendarUrl: z.string().optional(),
     // Opt-in write access. Only caldav can be writable; default read-only.
     writable: z.boolean().default(false),
+    // Who this calendar's events normally occupy (person or group ids). When
+    // omitted the baseline is [ownerId] — today's behaviour. A shared family
+    // calendar sets this to a group.
+    defaultOccupants: z.array(z.string()).optional(),
   })
   .superRefine((s, ctx) => {
     if (s.kind === "ics" && !s.url) {
@@ -53,6 +57,15 @@ const personSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   sourceIds: z.array(z.string()).default([]),
+  // Addresses used to match this person against an event's ATTENDEE props.
+  // Optional: a person with no email is never ATTENDEE-matched.
+  emails: z.array(z.string()).optional(),
+});
+
+const groupSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  memberIds: z.array(z.string()).default([]),
 });
 
 const orgSchema = z.object({
@@ -77,6 +90,7 @@ export const familyFileSchema = z.object({
   people: z.array(personSchema).default([]),
   organizations: z.array(orgSchema).default([]),
   sources: z.array(sourceSchema).default([]),
+  groups: z.array(groupSchema).default([]),
   attendance: z.array(attendanceSchema).default([]),
   settings: z
     .object({
@@ -109,7 +123,7 @@ export const ruleMatchSchema = z.object({
 });
 
 export const ruleRoleSchema = z.enum(["hard", "soft", "info", "conditional", "inherit"]);
-export const ruleEffectSchema = z.enum(["self", "mask"]);
+export const ruleEffectSchema = z.enum(["self", "mask", "fanout"]);
 
 /** snake_case wire match → core `RuleMatch`. Conditional spreads keep optional
  * keys absent (not `undefined`) for exactOptionalPropertyTypes. */
@@ -153,6 +167,7 @@ export function checkReferences(family: FamilyFile): ValidationIssue[] {
   const peopleIds = new Set<string>();
   const orgIds = new Set<string>();
   const sourceIds = new Set<string>();
+  const groupIds = new Set<string>(family.groups.map((g) => g.id));
 
   // Duplicate detection. People, organizations, and sources share one id
   // namespace as far as references go (sourceIds, ownerId), so a collision
@@ -175,6 +190,31 @@ export function checkReferences(family: FamilyFile): ValidationIssue[] {
   for (const [i, s] of family.sources.entries()) {
     sourceIds.add(s.id);
     claim(s.id, `sources[${i}]`, `sources[${i}].id`);
+  }
+  for (const [i, g] of family.groups.entries()) {
+    claim(g.id, `groups[${i}]`, `groups[${i}].id`);
+  }
+
+  // A person/group id, for occupancy references (defaultOccupants, group members).
+  const isOccupant = (id: string) => peopleIds.has(id) || groupIds.has(id);
+
+  // Group members must resolve to a known person or group.
+  for (const [i, g] of family.groups.entries()) {
+    for (const [j, mid] of g.memberIds.entries()) {
+      if (!isOccupant(mid)) {
+        add(`groups[${i}].memberIds[${j}]`, `unknown person/group "${mid}"`);
+      }
+    }
+  }
+
+  // Source defaultOccupants must resolve to known people/groups.
+  for (const [i, s] of family.sources.entries()) {
+    if (!s.defaultOccupants) continue;
+    for (const [j, oid] of s.defaultOccupants.entries()) {
+      if (!isOccupant(oid)) {
+        add(`sources[${i}].defaultOccupants[${j}]`, `unknown person/group "${oid}"`);
+      }
+    }
   }
 
   // Dangling sourceIds on people / organizations (silently dropped at runtime).
@@ -257,6 +297,9 @@ export interface LoadedConfig {
   settings: DaemonSettings;
   /** sourceId -> personId, derived from source ownership when owned by a person. */
   personIdForSource: (sourceId: string) => string;
+  /** ATTENDEE emails -> known person ids (case-insensitive, deduped, external
+   * addresses dropped). Used by adapters to populate `attendeeIds`. */
+  resolveAttendeeIds: (emails: string[]) => string[];
   familyVersion: string;
   /** Deprecated family.yaml attendance edges, for the one-time rule-store seed. */
   attendanceSeed: FamilyFile["attendance"];
@@ -366,6 +409,7 @@ export function buildFamily(file: FamilyFile): {
     defaultRole: s.defaultRole as Role,
     ownedBy: s.ownedBy,
     ownerId: s.ownerId,
+    ...(s.defaultOccupants !== undefined ? { defaultOccupants: s.defaultOccupants } : {}),
   }));
   const refById = new Map(sourceRefs.map((r) => [r.id, r]));
 
@@ -376,6 +420,7 @@ export function buildFamily(file: FamilyFile): {
       sources: p.sourceIds
         .map((id) => refById.get(id))
         .filter((r): r is NonNullable<typeof r> => r !== undefined),
+      ...(p.emails !== undefined ? { emails: p.emails } : {}),
     })),
     organizations: file.organizations.map((o) => ({
       id: o.id,
@@ -385,6 +430,9 @@ export function buildFamily(file: FamilyFile): {
         .filter((r): r is NonNullable<typeof r> => r !== undefined),
     })),
     sources: sourceRefs,
+    ...(file.groups.length > 0
+      ? { groups: file.groups.map((g) => ({ id: g.id, name: g.name, memberIds: g.memberIds })) }
+      : {}),
   };
 
   const connections: SourceConnection[] = file.sources.map((s) =>
@@ -431,11 +479,35 @@ export async function loadConfig(familyPath: string): Promise<LoadedConfig> {
     return owner.ownerId;
   };
 
+  // email (lowercased) -> personId, for ATTENDEE matching. A person may list
+  // several addresses; a duplicate address across people is a config error
+  // caught by checkReferences (first wins here, defensively).
+  const personIdByEmail = new Map<string, string>();
+  for (const p of family.people) {
+    for (const e of p.emails ?? []) {
+      const key = e.toLowerCase();
+      if (!personIdByEmail.has(key)) personIdByEmail.set(key, p.id);
+    }
+  }
+  const resolveAttendeeIds = (emails: string[]): string[] => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const e of emails) {
+      const id = personIdByEmail.get(e.toLowerCase());
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        out.push(id);
+      }
+    }
+    return out;
+  };
+
   return {
     family,
     connections,
     settings,
     personIdForSource,
+    resolveAttendeeIds,
     familyVersion: hashJson(family),
     attendanceSeed,
   };

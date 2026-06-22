@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import type { CalEvent, ResolvedEvent } from "@cango/core";
+import type { CalEvent, Occupant, ResolvedEvent } from "@cango/core";
 
 export interface SourceStatus {
   id: string;
@@ -17,6 +17,10 @@ interface EventRow {
   end_ms: number;
   title: string;
   all_day: number;
+  /** JSON array of person ids matched from ATTENDEE props; "[]" when none. Kept
+   * as a column (not just inside raw_json) so the person filter can widen to
+   * events that occupy a requested person via ATTENDEE, not only ownership. */
+  attendee_ids_json: string;
   raw_json: string;
   fetched_at: number;
 }
@@ -54,11 +58,17 @@ export class Cache {
         end_ms INTEGER NOT NULL,
         title TEXT NOT NULL,
         all_day INTEGER NOT NULL DEFAULT 0,
+        attendee_ids_json TEXT NOT NULL DEFAULT '[]',
         raw_json TEXT NOT NULL,
         fetched_at INTEGER NOT NULL,
         PRIMARY KEY (source_id, id)
       )
     `);
+    // Add attendee_ids_json to pre-existing event tables (the cache is
+    // disposable, but ALTER avoids a forced full refetch on upgrade).
+    if (!this.hasColumn("events", "attendee_ids_json")) {
+      this.db.run(`ALTER TABLE events ADD COLUMN attendee_ids_json TEXT NOT NULL DEFAULT '[]'`);
+    }
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_events_window ON events (start_ms, end_ms)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_events_person ON events (person_id)`);
     this.db.run(`
@@ -73,6 +83,11 @@ export class Cache {
     `);
   }
 
+  private hasColumn(table: string, column: string): boolean {
+    const cols = this.db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    return cols.some((c) => c.name === column);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -83,8 +98,9 @@ export class Cache {
       this.db.run("DELETE FROM events WHERE source_id = ?", [sourceId]);
       const insert = this.db.prepare(`
         INSERT INTO events
-          (id, source_id, person_id, series_id, start_ms, end_ms, title, all_day, raw_json, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, source_id, person_id, series_id, start_ms, end_ms, title, all_day,
+           attendee_ids_json, raw_json, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const e of rows) {
         insert.run(
@@ -96,6 +112,7 @@ export class Cache {
           e.end.getTime(),
           e.title,
           e.allDay ? 1 : 0,
+          JSON.stringify(e.attendeeIds ?? []),
           JSON.stringify(serializeEvent(e)),
           fetchedAt,
         );
@@ -106,15 +123,39 @@ export class Cache {
     tx(events);
   }
 
-  eventsInWindow(start: Date, end: Date, personIds?: string[]): CalEvent[] {
+  /**
+   * Events overlapping [start,end). When `personIds` is given the query narrows
+   * to events that *might* occupy one of those people — but occupancy is no
+   * longer just `person_id`: an event can occupy people via ATTENDEE matches
+   * (`attendee_ids_json`) or, more elusively, via a `fanout` rule whose targets
+   * aren't stored on the row at all. So when `fanoutActive` is true the SQL
+   * person filter is dropped entirely and the caller filters precisely on the
+   * resolved `occupants` after `applyFanout`. Without fanout rules we can still
+   * filter cheaply in SQL on ownership OR a stored attendee match.
+   */
+  eventsInWindow(
+    start: Date,
+    end: Date,
+    personIds?: string[],
+    fanoutActive = false,
+  ): CalEvent[] {
     const startMs = start.getTime();
     const endMs = end.getTime();
-    let sql =
-      "SELECT * FROM events WHERE start_ms < ? AND end_ms > ?";
+    let sql = "SELECT * FROM events WHERE start_ms < ? AND end_ms > ?";
     const params: (number | string)[] = [endMs, startMs];
-    if (personIds && personIds.length > 0) {
-      sql += ` AND person_id IN (${personIds.map(() => "?").join(",")})`;
+    if (personIds && personIds.length > 0 && !fanoutActive) {
+      // Owner is the person, OR the person appears in the stored attendee ids.
+      // The attendee match is a JSON-substring LIKE on the JSON-quoted id; the
+      // quotes prevent one id being a prefix/substring of another. LIKE wildcards
+      // (`%`/`_`) in an id would otherwise over-match, so escape them and declare
+      // an ESCAPE char — ids are our own slugs but we don't rely on that.
+      const placeholders = personIds.map(() => "?").join(",");
+      const attendeeClauses = personIds
+        .map(() => "attendee_ids_json LIKE ? ESCAPE '\\'")
+        .join(" OR ");
+      sql += ` AND (person_id IN (${placeholders}) OR ${attendeeClauses})`;
       params.push(...personIds);
+      params.push(...personIds.map((id) => `%${escapeLike(JSON.stringify(id))}%`));
     }
     sql += " ORDER BY start_ms ASC";
     const rows = this.db.query(sql).all(...params) as EventRow[];
@@ -227,6 +268,7 @@ interface SerializedEvent {
   rsvpStatus?: CalEvent["rsvpStatus"];
   organizerIsSelf?: boolean;
   attendeeCount?: number;
+  attendeeIds?: string[];
   recurring?: boolean;
 }
 
@@ -243,6 +285,7 @@ function serializeEvent(e: CalEvent): SerializedEvent {
     ...(e.rsvpStatus !== undefined ? { rsvpStatus: e.rsvpStatus } : {}),
     ...(e.organizerIsSelf !== undefined ? { organizerIsSelf: e.organizerIsSelf } : {}),
     ...(e.attendeeCount !== undefined ? { attendeeCount: e.attendeeCount } : {}),
+    ...(e.attendeeIds !== undefined ? { attendeeIds: e.attendeeIds } : {}),
     ...(e.recurring !== undefined ? { recurring: e.recurring } : {}),
   };
 }
@@ -260,6 +303,7 @@ function deserializeEvent(s: SerializedEvent): CalEvent {
     ...(s.rsvpStatus !== undefined ? { rsvpStatus: s.rsvpStatus } : {}),
     ...(s.organizerIsSelf !== undefined ? { organizerIsSelf: s.organizerIsSelf } : {}),
     ...(s.attendeeCount !== undefined ? { attendeeCount: s.attendeeCount } : {}),
+    ...(s.attendeeIds !== undefined ? { attendeeIds: s.attendeeIds } : {}),
     ...(s.recurring !== undefined ? { recurring: s.recurring } : {}),
   };
 }
@@ -269,12 +313,14 @@ function serializeResolved(e: ResolvedEvent): SerializedEvent & {
   resolvedBy: ResolvedEvent["resolvedBy"];
   resolvedReason: string;
   ruleId?: string;
+  occupants: Occupant[];
 } {
   return {
     ...serializeEvent(e),
     resolvedRole: e.resolvedRole,
     resolvedBy: e.resolvedBy,
     resolvedReason: e.resolvedReason,
+    occupants: e.occupants,
     ...(e.ruleId !== undefined ? { ruleId: e.ruleId } : {}),
   };
 }
@@ -286,10 +332,33 @@ function deserializeResolved(json: string): ResolvedEvent {
     resolvedRole: s.resolvedRole,
     resolvedBy: s.resolvedBy,
     resolvedReason: s.resolvedReason,
+    // Back-compat: a cache row written before occupants existed resolves to the
+    // owning person at the event's role.
+    occupants: s.occupants ?? [{ personId: s.personId, role: s.resolvedRole }],
     ...(s.ruleId !== undefined ? { ruleId: s.ruleId } : {}),
   };
 }
 
 function rowToEvent(row: EventRow): CalEvent {
-  return deserializeEvent(JSON.parse(row.raw_json) as SerializedEvent);
+  const event = deserializeEvent(JSON.parse(row.raw_json) as SerializedEvent);
+  // attendee_ids_json is the authoritative column (it's what the person filter
+  // and migrations key off); fall back to whatever raw_json carried.
+  const ids = parseIds(row.attendee_ids_json);
+  if (ids.length > 0) event.attendeeIds = ids;
+  return event;
+}
+
+/** Escape SQL LIKE metacharacters (`\`, `%`, `_`) for use with `ESCAPE '\'`. */
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (m) => `\\${m}`);
+}
+
+function parseIds(json: string | null | undefined): string[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
 }

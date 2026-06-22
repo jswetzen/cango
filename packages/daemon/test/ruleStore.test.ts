@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { RuleStore } from "../src/ruleStore.ts";
 
 describe("RuleStore", () => {
@@ -50,6 +54,35 @@ describe("RuleStore", () => {
     expect(store.version()).not.toBe(empty);
   });
 
+  test("fanout rule round-trips occupants", () => {
+    const r = store.create({
+      match: { seriesId: "lager" },
+      role: "soft",
+      effect: "fanout",
+      occupants: ["eli", "jona", "family"],
+      reason: "family may attend",
+    });
+    expect(r.effect).toBe("fanout");
+    expect(r.occupants).toEqual(["eli", "jona", "family"]);
+    expect(store.active()[0]!.occupants).toEqual(["eli", "jona", "family"]);
+  });
+
+  test("amend can change and clear occupants", () => {
+    const r = store.create({
+      match: { seriesId: "s" },
+      role: "soft",
+      effect: "fanout",
+      occupants: ["eli"],
+      reason: "x",
+    });
+    expect(store.amend(r.id!, { occupants: ["jona", "sara"] }).occupants).toEqual([
+      "jona",
+      "sara",
+    ]);
+    // Empty array clears it (becomes undefined).
+    expect(store.amend(r.id!, { occupants: [] }).occupants).toBeUndefined();
+  });
+
   test("seedFromAttendance maps roles and runs exactly once", () => {
     const n = store.seedFromAttendance([
       { personId: "p-kid", seriesId: "u11", role: "ATTENDS", reason: "on the squad" },
@@ -69,5 +102,46 @@ describe("RuleStore", () => {
     ]);
     expect(again).toBe(0);
     expect(store.active()).toHaveLength(3);
+  });
+
+  test("v1 → v2 migration adds occupants_json and keeps existing rules", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cango-rules-"));
+    const path = join(dir, "state.db");
+    try {
+      // Hand-build a v1 schema (no occupants_json) with one rule.
+      const raw = new Database(path, { create: true });
+      raw.run(`
+        CREATE TABLE rules (
+          id TEXT PRIMARY KEY, match_json TEXT NOT NULL, role TEXT NOT NULL,
+          effect TEXT NOT NULL DEFAULT 'self', reason TEXT NOT NULL,
+          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, retracted_at INTEGER
+        )`);
+      raw.run(`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)`);
+      raw.run(`INSERT INTO meta (key, value) VALUES ('schema_version', '1')`);
+      raw.run(
+        `INSERT INTO rules (id, match_json, role, effect, reason, created_at, updated_at, retracted_at)
+         VALUES ('r1', '{"seriesId":"s"}', 'soft', 'self', 'old rule', 1, 1, NULL)`,
+      );
+      raw.close();
+
+      // Opening through RuleStore must migrate in place.
+      const migrated = new RuleStore(path);
+      const rules = migrated.active();
+      expect(rules).toHaveLength(1);
+      expect(rules[0]!.id).toBe("r1");
+      expect(rules[0]!.occupants).toBeUndefined(); // null column → no occupants
+      // New fanout rules work post-migration.
+      const f = migrated.create({
+        match: { seriesId: "t" },
+        role: "soft",
+        effect: "fanout",
+        occupants: ["eli"],
+        reason: "y",
+      });
+      expect(migrated.get(f.id!)!.occupants).toEqual(["eli"]);
+      migrated.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

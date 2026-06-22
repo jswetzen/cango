@@ -32,6 +32,7 @@ export async function fetchSource(
   window: FetchWindow,
   personIdForSource: (sourceId: string) => string,
   adapters: Adapters = realAdapters,
+  resolveAttendeeIds?: (emails: string[]) => string[],
 ): Promise<CalEvent[]> {
   if (connection.kind === "ics") {
     return adapters.fetchIcs(
@@ -39,18 +40,23 @@ export async function fetchSource(
         sourceId: connection.sourceId,
         url: connection.url,
         resolvePersonId: personIdForSource,
+        ...(resolveAttendeeIds !== undefined ? { resolveAttendeeIds } : {}),
         ...(connection.selfEmail !== undefined ? { selfEmail: connection.selfEmail } : {}),
       },
       window,
     );
   }
-  return adapters.fetchCalDav(caldavConfig(connection, personIdForSource), window);
+  return adapters.fetchCalDav(
+    caldavConfig(connection, personIdForSource, resolveAttendeeIds),
+    window,
+  );
 }
 
 /** Build the adapter config shared by the read and write paths. */
 function caldavConfig(
   connection: Extract<SourceConnection, { kind: "caldav" }>,
   personIdForSource: (sourceId: string) => string,
+  resolveAttendeeIds?: (emails: string[]) => string[],
 ) {
   return {
     sourceId: connection.sourceId,
@@ -58,6 +64,7 @@ function caldavConfig(
     username: connection.username,
     password: connection.password,
     resolvePersonId: personIdForSource,
+    ...(resolveAttendeeIds !== undefined ? { resolveAttendeeIds } : {}),
     ...(connection.selfEmail !== undefined ? { selfEmail: connection.selfEmail } : {}),
     ...(connection.calendarUrl !== undefined ? { calendarUrl: connection.calendarUrl } : {}),
     // calendarName is ignored when an explicit calendarUrl pins the collection.

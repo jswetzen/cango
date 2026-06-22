@@ -5,4 +5,5 @@ export type {
   CalDavCalendarLike,
   CalDavObjectLike,
   CreateEventInput,
+  CreateEventAttendee,
 } from "./fetchEvents.js";

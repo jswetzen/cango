@@ -1,3 +1,4 @@
+import { baseOccupants } from "./occupants.js";
 import type {
   CalEvent,
   ExplainTraceEntry,
@@ -41,22 +42,23 @@ export function resolveRoleWithTrace(
     layer: "structural",
     outcome: structural ? describe(structural) : "no match",
   });
-  if (structural) return finalize(event, structural, trace);
+  if (structural) return finalize(event, family, structural, trace);
 
   const ruled = resolveRule(event, family, rules);
   trace.push({
     layer: "rule",
     outcome: ruled ? describe(ruled) : "no matching rule",
   });
-  if (ruled) return finalize(event, ruled, trace);
+  if (ruled) return finalize(event, family, ruled, trace);
 
   const fallback = resolveDefault(event, family);
   trace.push({ layer: "default", outcome: describe(fallback) });
-  return finalize(event, fallback, trace);
+  return finalize(event, family, fallback, trace);
 }
 
 function finalize(
   event: CalEvent,
+  family: FamilyGraph,
   resolution: Resolution,
   trace: ExplainTraceEntry[],
 ): ResolveTrace {
@@ -65,6 +67,13 @@ function finalize(
     resolvedRole: resolution.role,
     resolvedBy: resolution.by,
     resolvedReason: resolution.reason,
+    // Per-event occupancy baseline (source defaults + ATTENDEE matches), each at
+    // the event's base role. Fanout rules add occupants (possibly at a different
+    // role) in a later cross-event pass (`applyFanout`).
+    occupants: baseOccupants(event, family).map((personId) => ({
+      personId,
+      role: resolution.role,
+    })),
     ...(resolution.ruleId !== undefined ? { ruleId: resolution.ruleId } : {}),
   };
   return { resolved, trace };

@@ -22,6 +22,10 @@ people:
   - id: p-kid
     name: Kid
     sourceIds: [src-club]
+groups:
+  - id: family
+    name: Everyone
+    memberIds: [p-me, p-kid]
 organizations:
   - id: org-club
     name: Club
@@ -33,6 +37,15 @@ sources:
     ownerId: p-me
     defaultRole: hard
     url: https://example.invalid/work.ics
+  # Shared family calendar: events occupy the whole household by default, with
+  # NO fanout rule involved — exercises the defaultOccupants widening path.
+  - id: src-family
+    kind: ics
+    ownedBy: person
+    ownerId: p-me
+    defaultRole: soft
+    defaultOccupants: [family]
+    url: https://example.invalid/family.ics
   - id: src-club
     kind: ics
     ownedBy: organization
@@ -106,6 +119,7 @@ describe("daemon e2e over the socket", () => {
     ]);
     cache.markSuccess("src-work");
     cache.markSuccess("src-club");
+    cache.markSuccess("src-family");
 
     const ctx: RpcContext = {
       cache,
@@ -357,6 +371,111 @@ describe("daemon e2e over the socket", () => {
       people: ["p-me"],
     })) as { verdict: string };
     expect(res.verdict).toBe("free");
+  });
+
+  test("household fan-out: a camp on Johan's calendar surfaces on the kid as soft", async () => {
+    // The literal task case. Camp on src-work (owner p-me), no link to the kid.
+    cache.replaceSourceEvents("src-work", [
+      event({
+        id: "camp",
+        title: "Saras läger",
+        seriesId: "lager-2026",
+        allDay: true,
+        start: new Date("2026-07-01T00:00:00Z"),
+        end: new Date("2026-07-06T00:00:00Z"),
+      }),
+    ]);
+
+    // Before any rule: a kid check over the camp window is FREE (the gap).
+    let kid = (await rpcCall(socketPath, "checkAvailability", {
+      start: "2026-07-03T00:00:00Z",
+      end: "2026-07-04T00:00:00Z",
+      people: ["p-kid"],
+    })) as { verdict: string };
+    expect(kid.verdict).toBe("free");
+
+    // Add a fanout rule onto the whole family at soft ("might go").
+    await rpcCall(socketPath, "createRule", {
+      match: { series_id: "lager-2026" },
+      role: "soft",
+      effect: "fanout",
+      occupants: ["family"],
+      reason: "family may attend camp — confirm before booking over",
+    });
+
+    // Now the kid sees it as a soft conflict.
+    kid = (await rpcCall(socketPath, "checkAvailability", {
+      start: "2026-07-03T00:00:00Z",
+      end: "2026-07-04T00:00:00Z",
+      people: ["p-kid"],
+    })) as { verdict: string };
+    expect(kid.verdict).toBe("soft_conflict");
+
+    // And it's still HARD for Johan (it's on his calendar at the source default).
+    const me = (await rpcCall(socketPath, "checkAvailability", {
+      start: "2026-07-03T00:00:00Z",
+      end: "2026-07-04T00:00:00Z",
+      people: ["p-me"],
+    })) as { verdict: string; conflicts: Array<{ event: { occupants?: unknown } }> };
+    expect(me.verdict).toBe("hard_conflict");
+  });
+
+  test("defaultOccupants: a shared-calendar event surfaces on a non-owner with NO fanout rule", async () => {
+    // The regression guard: occupancy via source defaultOccupants must widen the
+    // cache person filter even though no fanout rule exists.
+    // Late evening, clear of the seeded 16:00 club training, so the only thing
+    // the kid can collide with here is the family dinner via defaultOccupants.
+    cache.replaceSourceEvents("src-family", [
+      event({
+        id: "fam1",
+        title: "Family dinner",
+        sourceId: "src-family",
+        personId: "p-me", // owner; defaultOccupants:[family] adds the kid
+        start: new Date("2026-06-01T20:00:00Z"),
+        end: new Date("2026-06-01T21:00:00Z"),
+      }),
+    ]);
+    cache.markSuccess("src-family");
+
+    // The kid is an occupant via defaultOccupants only — must see it (soft).
+    const kid = (await rpcCall(socketPath, "checkAvailability", {
+      start: "2026-06-01T19:30:00Z",
+      end: "2026-06-01T21:30:00Z",
+      people: ["p-kid"],
+    })) as { verdict: string; conflicts: Array<{ event: { title: string } }> };
+    expect(kid.verdict).toBe("soft_conflict");
+    expect(kid.conflicts.some((c) => c.event.title === "Family dinner")).toBe(true);
+
+    // And listEvents for the kid includes it.
+    const list = (await rpcCall(socketPath, "listEvents", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-02T00:00:00Z",
+      people: ["p-kid"],
+    })) as { events: Array<{ title: string }> };
+    expect(list.events.some((e) => e.title === "Family dinner")).toBe(true);
+  });
+
+  test("createRule rejects occupants on a non-fanout rule", async () => {
+    await expect(
+      rpcCall(socketPath, "createRule", {
+        match: { title_regex: "x" },
+        role: "soft",
+        occupants: ["family"],
+        reason: "bad",
+      }),
+    ).rejects.toThrow(/occupants are only valid/);
+  });
+
+  test("createRule rejects an unknown occupant id", async () => {
+    await expect(
+      rpcCall(socketPath, "createRule", {
+        match: { title_regex: "x" },
+        role: "soft",
+        effect: "fanout",
+        occupants: ["p-ghost"],
+        reason: "bad",
+      }),
+    ).rejects.toThrow(/unknown person\/group/);
   });
 
   test("unknown method returns an RPC error", async () => {
