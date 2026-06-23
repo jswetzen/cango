@@ -45,7 +45,8 @@ organizations:
     sourceIds: [src-football]
 
 sources:
-  # Work calendar over CalDAV. Many meetings are optional — see rules.yaml.
+  # Work calendar over CalDAV. Many meetings are optional — record a `soft` rule
+  # for them at runtime via the agent (record_rule); rules are no longer in YAML.
   - id: src-work
     kind: caldav
     ownedBy: person
