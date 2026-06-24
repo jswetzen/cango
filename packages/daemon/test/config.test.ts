@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expandConnectionEnv, expandEnvVars, YamlFamilySource } from "../src/config.ts";
+import {
+  buildFamily,
+  expandConnectionEnv,
+  expandEnvVars,
+  familyFileSchema,
+  YamlFamilySource,
+} from "../src/config.ts";
 
 describe("expandEnvVars", () => {
   test("replaces set vars and reports missing ones", () => {
@@ -50,6 +56,30 @@ describe("expandConnectionEnv", () => {
     expect(connection.kind === "caldav" && connection.calendarUrl).toBe(
       "https://x/remote.php/dav/calendars/u/personal/",
     );
+  });
+});
+
+describe("conditional role coercion", () => {
+  test("a source defaultRole: conditional in family.yaml loads as info", () => {
+    // `conditional` was removed; the schema preprocessor coerces a lingering
+    // value so an old family.yaml still loads rather than failing the enum.
+    const file = familyFileSchema.parse({
+      people: [{ id: "p-me", name: "Me", sourceIds: ["src-x"] }],
+      sources: [
+        {
+          id: "src-x",
+          kind: "ics",
+          ownedBy: "person",
+          ownerId: "p-me",
+          url: "https://example.invalid/x.ics",
+          defaultRole: "conditional",
+        },
+      ],
+    });
+    expect(file.sources[0]!.defaultRole).toBe("info");
+    // And it survives into the built FamilyGraph as a concrete Role.
+    const { family } = buildFamily(file);
+    expect(family.sources[0]!.defaultRole).toBe("info");
   });
 });
 

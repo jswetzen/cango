@@ -45,7 +45,7 @@ export function checkAvailability(
     // (a household event is `hard` for the owner, `soft` for "might go" kids);
     // emit one conflict row per requested occupant, tallied at *their* role.
     for (const occupant of resolved.occupants) {
-      if (occupant.role === "info" || occupant.role === "conditional") continue;
+      if (occupant.role === "info") continue;
       const person = peopleById.get(occupant.personId);
       if (!person) continue;
       conflicts.push({ person, event: resolved, overlapMinutes: overlap });

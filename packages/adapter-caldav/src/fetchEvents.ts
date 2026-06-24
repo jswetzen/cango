@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { CalEvent } from "@cango/core";
+import type { CalEvent, Role } from "@cango/core";
 import { parseIcs } from "@cango/adapter-ics";
 import {
   createDAVClient,
@@ -52,10 +52,13 @@ export interface CalDavClientLike {
 }
 
 /** A new event to write. Only simple, non-recurring events are supported. */
-/** One attendee to write into the VEVENT — a display name and email. */
+/** One attendee to write into the VEVENT — a display name, email, and the
+ * occupancy role it carries (serialized to ATTENDEE ROLE/PARTSTAT; default
+ * `hard`), so per-occupant role round-trips on the next fetch. */
 export interface CreateEventAttendee {
   name: string;
   email: string;
+  role?: Role;
 }
 
 export interface CreateEventInput {
@@ -189,14 +192,28 @@ function buildVevent(input: CreateEventInput, uid: string): string {
     ...(input.attendees && input.attendees.length > 0 && input.organizerEmail
       ? [`ORGANIZER:mailto:${input.organizerEmail}`]
       : []),
-    ...(input.attendees ?? []).map(
-      (a) =>
-        `ATTENDEE;CN=${escapeText(a.name)};ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:${a.email}`,
-    ),
+    ...(input.attendees ?? []).map((a) => {
+      const { role, partstat } = attendeeParams(a.role);
+      return `ATTENDEE;CN=${escapeText(a.name)};ROLE=${role};PARTSTAT=${partstat}:mailto:${a.email}`;
+    }),
     "END:VEVENT",
     "END:VCALENDAR",
   ];
   return lines.map(foldLine).join("\r\n") + "\r\n";
+}
+
+/** Map an occupancy role to ATTENDEE ROLE/PARTSTAT params (default `hard`). The
+ * inverse of the read mapping in @cango/adapter-ics, so occupancy round-trips:
+ * hard → REQ/ACCEPTED, soft → OPT/TENTATIVE, info → NON/DECLINED. */
+function attendeeParams(role: Role = "hard"): { role: string; partstat: string } {
+  switch (role) {
+    case "soft":
+      return { role: "OPT-PARTICIPANT", partstat: "TENTATIVE" };
+    case "info":
+      return { role: "NON-PARTICIPANT", partstat: "DECLINED" };
+    case "hard":
+      return { role: "REQ-PARTICIPANT", partstat: "ACCEPTED" };
+  }
 }
 
 /**

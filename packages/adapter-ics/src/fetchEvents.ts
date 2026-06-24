@@ -1,4 +1,4 @@
-import type { CalEvent, RsvpStatus } from "@cango/core";
+import type { CalEvent, Role, RsvpStatus } from "@cango/core";
 import * as nodeIcal from "node-ical";
 import type { CalendarComponent, VEvent } from "node-ical";
 import { deriveSeriesId } from "./seriesId.js";
@@ -181,7 +181,8 @@ function assembleCalEvent(args: {
   const rsvp = extractRsvp(vevent, config.selfEmail);
   const organizerIsSelf = isOrganizerSelf(vevent, config.selfEmail);
   const attendeeCount = countAttendees(vevent);
-  const attendeeIds = resolveAttendeeIds(vevent, config);
+  const attendees = resolveAttendees(vevent, config);
+  const attendeeIds = attendees.map((a) => a.personId);
   return {
     id,
     sourceId: config.sourceId,
@@ -196,6 +197,7 @@ function assembleCalEvent(args: {
     ...(organizerIsSelf !== undefined ? { organizerIsSelf } : {}),
     ...(attendeeCount !== undefined ? { attendeeCount } : {}),
     ...(attendeeIds.length > 0 ? { attendeeIds } : {}),
+    ...(attendees.length > 0 ? { attendees } : {}),
     raw: vevent,
   };
 }
@@ -273,18 +275,52 @@ function countAttendees(vevent: VEvent): number | undefined {
   return attendees.length || undefined;
 }
 
-/** Map the event's ATTENDEE emails to known person ids via the config resolver.
- * Returns [] when no resolver is supplied or nothing matches — occupancy then
- * leans on the source owner + fanout rules. */
-function resolveAttendeeIds(vevent: VEvent, config: IcsSourceConfig): string[] {
-  if (!config.resolveAttendeeIds) return [];
-  const emails: string[] = [];
+/** Map the event's ATTENDEEs to known {personId, role}, reading each attendee's
+ * PARTSTAT/ROLE for the role. Returns [] when no resolver is supplied or nothing
+ * matches — occupancy then leans on the source owner + fanout rules. Deduped by
+ * personId (first ATTENDEE wins), order-preserving. */
+function resolveAttendees(
+  vevent: VEvent,
+  config: IcsSourceConfig,
+): Array<{ personId: string; role?: Role }> {
+  const resolve = config.resolveAttendeeIds;
+  if (!resolve) return [];
+  const out: Array<{ personId: string; role?: Role }> = [];
+  const seen = new Set<string>();
   for (const att of normalizeAttendees(vevent)) {
     const email = attendeeEmail(att);
-    if (email) emails.push(email);
+    if (!email) continue;
+    const [personId] = resolve([email]);
+    if (!personId || seen.has(personId)) continue;
+    seen.add(personId);
+    const params = (att as { params?: { PARTSTAT?: string; ROLE?: string } }).params;
+    const role = attendeeRole(params?.PARTSTAT, params?.ROLE);
+    out.push(role !== undefined ? { personId, role } : { personId });
   }
-  if (emails.length === 0) return [];
-  return config.resolveAttendeeIds(emails);
+  return out;
+}
+
+/** Read an ATTENDEE's occupancy role from its iCal props. PARTSTAT is the
+ * attendance signal and wins; ROLE is the fallback; an unknown/NEEDS-ACTION
+ * attendee yields `undefined` so the occupant inherits the event's base role. */
+function attendeeRole(partstat?: string, role?: string): Role | undefined {
+  switch ((partstat ?? "").toUpperCase()) {
+    case "ACCEPTED":
+      return "hard";
+    case "TENTATIVE":
+      return "soft";
+    case "DECLINED":
+      return "info";
+  }
+  switch ((role ?? "").toUpperCase()) {
+    case "REQ-PARTICIPANT":
+      return "hard";
+    case "OPT-PARTICIPANT":
+      return "soft";
+    case "NON-PARTICIPANT":
+      return "info";
+  }
+  return undefined;
 }
 
 function normalizeAttendees(vevent: VEvent): unknown[] {

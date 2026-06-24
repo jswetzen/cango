@@ -37,19 +37,30 @@ export function resolveRoleWithTrace(
 ): ResolveTrace {
   const trace: ExplainTraceEntry[] = [];
 
-  const structural = resolveStructural(event);
+  // A decline is authoritative — it outranks even an explicit rule ("I said no").
+  const declined = resolveDeclined(event);
   trace.push({
     layer: "structural",
-    outcome: structural ? describe(structural) : "no match",
+    outcome: declined ? describe(declined) : "no decline",
   });
-  if (structural) return finalize(event, family, structural, trace);
+  if (declined) return finalize(event, family, declined, trace);
 
+  // The mutable rule layer sits ABOVE the soft heuristics, so a rule can override
+  // "self-organized solo → soft" / "RSVP tentative → soft" — the whole point of
+  // having an agent-managed override store.
   const ruled = resolveRule(event, family, rules);
   trace.push({
     layer: "rule",
     outcome: ruled ? describe(ruled) : "no matching rule",
   });
   if (ruled) return finalize(event, family, ruled, trace);
+
+  const heuristic = resolveSoftHeuristics(event);
+  trace.push({
+    layer: "heuristic",
+    outcome: heuristic ? describe(heuristic) : "no heuristic",
+  });
+  if (heuristic) return finalize(event, family, heuristic, trace);
 
   const fallback = resolveDefault(event, family);
   trace.push({ layer: "default", outcome: describe(fallback) });
@@ -67,12 +78,13 @@ function finalize(
     resolvedRole: resolution.role,
     resolvedBy: resolution.by,
     resolvedReason: resolution.reason,
-    // Per-event occupancy baseline (source defaults + ATTENDEE matches), each at
-    // the event's base role. Fanout rules add occupants (possibly at a different
-    // role) in a later cross-event pass (`applyFanout`).
-    occupants: baseOccupants(event, family).map((personId) => ({
-      personId,
-      role: resolution.role,
+    // Per-event occupancy baseline (source defaults + ATTENDEE matches). Each
+    // occupant takes its own per-attendee role when the event carried one
+    // (PARTSTAT/ROLE), else the event's base role. Fanout rules may further
+    // adjust occupants in a later cross-event pass (`applyFanout`).
+    occupants: baseOccupants(event, family).map((o) => ({
+      personId: o.personId,
+      role: o.role ?? resolution.role,
     })),
     ...(resolution.ruleId !== undefined ? { ruleId: resolution.ruleId } : {}),
   };
@@ -83,7 +95,9 @@ function describe(r: Resolution): string {
   return `${r.role} (${r.by}): ${r.reason}`;
 }
 
-function resolveStructural(event: CalEvent): Resolution | null {
+/** Authoritative structural signal: a declined invite is `info`, full stop. Sits
+ * above the rule layer — no rule should resurrect an event you declined. */
+function resolveDeclined(event: CalEvent): Resolution | null {
   if (event.rsvpStatus === "declined") {
     return {
       role: "info",
@@ -91,6 +105,12 @@ function resolveStructural(event: CalEvent): Resolution | null {
       reason: "RSVP declined",
     };
   }
+  return null;
+}
+
+/** Soft, overridable heuristics: best-effort guesses that a rule may outrank.
+ * They sit BELOW the rule layer so an explicit judgement always wins. */
+function resolveSoftHeuristics(event: CalEvent): Resolution | null {
   if (event.organizerIsSelf === true && event.attendeeCount === 1) {
     return {
       role: "soft",

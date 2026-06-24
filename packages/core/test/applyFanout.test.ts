@@ -14,9 +14,16 @@ function roles(occupants: Occupant[]): Record<string, string> {
   return Object.fromEntries(occupants.map((o) => [o.personId, o.role]));
 }
 
+/** baseOccupants now returns {personId, role?}; project to a sorted id list. */
+function ids(occupants: { personId: string }[]): string[] {
+  return occupants.map((o) => o.personId).sort();
+}
+
 describe("baseOccupants", () => {
-  it("defaults to the owning person", () => {
-    expect(baseOccupants(event({ id: "e" }), makeFamily())).toEqual(["p-me"]);
+  it("defaults to the owning person (role-less)", () => {
+    expect(baseOccupants(event({ id: "e" }), makeFamily())).toEqual([
+      { personId: "p-me" },
+    ]);
   });
 
   it("uses a source's defaultOccupants (group-expanded), keeping the owner", () => {
@@ -29,12 +36,34 @@ describe("baseOccupants", () => {
     };
     const family = makeFamily([shared], [familyGroup]);
     const ev = event({ id: "e", sourceId: "src-family" });
-    expect(baseOccupants(ev, family).sort()).toEqual(["p-kid", "p-me", "p-wife"]);
+    expect(ids(baseOccupants(ev, family))).toEqual(["p-kid", "p-me", "p-wife"]);
   });
 
-  it("unions in the event's matched attendeeIds", () => {
+  it("unions in the event's matched attendeeIds (role-less)", () => {
     const ev = event({ id: "e", attendeeIds: ["p-wife"] });
-    expect(baseOccupants(ev, makeFamily()).sort()).toEqual(["p-me", "p-wife"]);
+    expect(ids(baseOccupants(ev, makeFamily()))).toEqual(["p-me", "p-wife"]);
+  });
+
+  it("carries a per-attendee role from the structured attendees field", () => {
+    const ev = event({
+      id: "e",
+      attendees: [{ personId: "p-wife", role: "soft" }],
+    });
+    const out = baseOccupants(ev, makeFamily());
+    // owner is role-less (inherits the event role); wife carries soft.
+    expect(out).toContainEqual({ personId: "p-me" });
+    expect(out).toContainEqual({ personId: "p-wife", role: "soft" });
+  });
+
+  it("an explicit attendee role fills in a person first seen role-less", () => {
+    // owner p-me appears role-less from the default-occupant layer, then carries
+    // an explicit role from the structured attendees layer.
+    const ev = event({
+      id: "e",
+      attendees: [{ personId: "p-me", role: "soft" }],
+    });
+    const out = baseOccupants(ev, makeFamily());
+    expect(out).toEqual([{ personId: "p-me", role: "soft" }]);
   });
 });
 
@@ -95,15 +124,108 @@ describe("applyFanout", () => {
     expect(roles(twice[0]!.occupants)).toEqual(roles(once[0]!.occupants));
   });
 
-  it("escalates an existing occupant's role, never demotes", () => {
+  it("a fanout rule may LOWER a non-owner occupant's role (most-specific-wins)", () => {
     const family = makeFamily();
-    // wife present at hard via attendee; a soft fanout must not demote her.
+    // wife present at hard via attendee; a soft fanout now demotes her — the
+    // rule is the authority, not an escalate-only escalator.
     const r = [resolved(event({ id: "e", title: "Camp", attendeeIds: ["p-wife"] }), family)];
     const rules: Rule[] = [
       rule({ match: { titleRegex: "Camp" }, role: "soft", effect: "fanout", occupants: ["p-wife"] }),
     ];
     const out = applyFanout(r, rules, family);
-    expect(roles(out[0]!.occupants)).toEqual({ "p-me": "hard", "p-wife": "hard" });
+    expect(roles(out[0]!.occupants)).toEqual({ "p-me": "hard", "p-wife": "soft" });
+  });
+
+  it("most-specific rule wins when several name the same person", () => {
+    const family = makeFamily();
+    const r = [resolved(event({ id: "e", sourceId: "src-work", title: "Camp" }), family)];
+    const rules: Rule[] = [
+      // broad (1 match field) — would set wife soft
+      rule({
+        match: { titleRegex: "Camp" },
+        role: "soft",
+        effect: "fanout",
+        occupants: ["p-wife"],
+        createdAt: 1,
+      }),
+      // specific (2 match fields) — wins, sets wife info
+      rule({
+        match: { titleRegex: "Camp", sourceId: "src-work" },
+        role: "info",
+        effect: "fanout",
+        occupants: ["p-wife"],
+        createdAt: 2,
+      }),
+    ];
+    const out = applyFanout(r, rules, family);
+    expect(roles(out[0]!.occupants)).toEqual({ "p-me": "hard", "p-wife": "info" });
+  });
+
+  it("ties on specificity break by older createdAt", () => {
+    const family = makeFamily();
+    const r = [resolved(event({ id: "e", title: "Camp" }), family)];
+    const rules: Rule[] = [
+      rule({
+        match: { titleRegex: "Camp" },
+        role: "soft",
+        effect: "fanout",
+        occupants: ["p-wife"],
+        createdAt: 1,
+      }),
+      rule({
+        match: { titleRegex: "Camp" },
+        role: "info",
+        effect: "fanout",
+        occupants: ["p-wife"],
+        createdAt: 2,
+      }),
+    ];
+    const out = applyFanout(r, rules, family);
+    // older (createdAt 1, soft) decides wife.
+    expect(roles(out[0]!.occupants)).toEqual({ "p-me": "hard", "p-wife": "soft" });
+  });
+
+  it("role: info removes a fanned occupant from the verdict", () => {
+    const family = makeFamily();
+    const r = [resolved(event({ id: "e", title: "Camp", attendeeIds: ["p-wife"] }), family)];
+    const rules: Rule[] = [
+      rule({ match: { titleRegex: "Camp" }, role: "info", effect: "fanout", occupants: ["p-wife"] }),
+    ];
+    const out = applyFanout(r, rules, family);
+    // wife is now info — present in the set but excluded from any conflict tally.
+    expect(roles(out[0]!.occupants)).toEqual({ "p-me": "hard", "p-wife": "info" });
+  });
+
+  it("owner is protected from a group-driven demotion below the event role", () => {
+    const family = makeFamily([], [familyGroup]);
+    // owner p-me resolves hard; a soft household fanout via the group must not
+    // quietly demote the calendar owner.
+    const r = [resolved(event({ id: "e", title: "Camp" }), family)];
+    const rules: Rule[] = [
+      rule({ match: { titleRegex: "Camp" }, role: "soft", effect: "fanout", occupants: ["family"] }),
+    ];
+    const out = applyFanout(r, rules, family);
+    expect(roles(out[0]!.occupants)).toEqual({
+      "p-me": "hard", // protected — stays at the event role
+      "p-wife": "soft",
+      "p-kid": "soft",
+    });
+  });
+
+  it("owner IS demotable when a rule names them literally", () => {
+    const family = makeFamily();
+    const r = [resolved(event({ id: "e", title: "Camp" }), family)];
+    const rules: Rule[] = [
+      rule({
+        match: { titleRegex: "Camp" },
+        role: "soft",
+        effect: "fanout",
+        occupants: ["p-me", "p-wife"],
+      }),
+    ];
+    const out = applyFanout(r, rules, family);
+    // p-me named literally → demotion to soft is honoured.
+    expect(roles(out[0]!.occupants)).toEqual({ "p-me": "soft", "p-wife": "soft" });
   });
 
   it("inherit role adds the occupant at the event's base role", () => {

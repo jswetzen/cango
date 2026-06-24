@@ -9,6 +9,7 @@ import {
   resolveRole,
   type CalEvent,
   type ResolvedEvent,
+  type Role,
   type Rule,
   type RuleMatch,
 } from "@cango/core";
@@ -63,7 +64,7 @@ const freeSlotParams = (tz: string) =>
   });
 
 // Mirrors the core `Role` union (no zod schema is exported from @cango/core).
-const roleEnum = z.enum(["hard", "soft", "info", "conditional"]);
+const roleEnum = z.enum(["hard", "soft", "info"]);
 
 const listEventsParams = (tz: string) =>
   z.object({
@@ -92,9 +93,14 @@ const createEventParams = (tz: string) =>
       start: isoDate(tz),
       end: isoDate(tz),
       all_day: z.boolean().default(false),
-      // Person/group ids who occupy this event. Each person with a known email
-      // gets an ATTENDEE line; those without are returned in `unwritten_occupants`.
-      occupants: z.array(z.string()).optional(),
+      // Person/group ids who occupy this event, each at a role (default `hard` —
+      // "I named them, they're attending"; pass a role for "might go"). A bare
+      // string is shorthand for `{id, role:"hard"}`. Each person with a known
+      // email gets an ATTENDEE line carrying that role (via ROLE/PARTSTAT); those
+      // without are returned in `unwritten_occupants`.
+      occupants: z
+        .array(z.union([z.string(), z.object({ id: z.string(), role: roleEnum.optional() })]))
+        .optional(),
     })
     .refine((p) => p.end > p.start, { message: "end must be after start" });
 
@@ -265,9 +271,14 @@ export const methods: Record<string, Handler> = {
     if (conn.kind !== "caldav" || !conn.writable) {
       throw new RpcError(-32005, `source not writable: ${p.source_id}`);
     }
-    for (const id of p.occupants ?? []) {
-      if (!isKnownOccupant(config, id)) {
-        throw new RpcError(-32602, `unknown person/group in occupants: ${id}`);
+    // Normalise occupants to {id, role} (a bare string is shorthand for role
+    // "hard"), then validate each id against the family graph.
+    const occupantSpecs = (p.occupants ?? []).map((o) =>
+      typeof o === "string" ? { id: o, role: "hard" as Role } : { id: o.id, role: o.role ?? "hard" },
+    );
+    for (const spec of occupantSpecs) {
+      if (!isKnownOccupant(config, spec.id)) {
+        throw new RpcError(-32602, `unknown person/group in occupants: ${spec.id}`);
       }
     }
     // All-day events are date-only: the CalDAV adapter writes `VALUE=DATE` from
@@ -277,25 +288,27 @@ export const methods: Record<string, Handler> = {
     const start = p.all_day ? zonedDateOnlyUtc(p.start, tz) : p.start;
     const end = p.all_day ? zonedDateOnlyUtc(p.end, tz) : p.end;
 
-    // Resolve occupant ids → ATTENDEE lines. Group-expand, then split into
-    // people we can write (a known email) and those we can't — the latter are
-    // reported back so the caller can add an email or a fanout rule instead of
-    // silently losing them. The owner is implicit (it's their calendar), so
-    // don't write the owner as an ATTENDEE.
+    // Group-expand occupants to a per-person role (first spec wins), excluding
+    // the owner (it's their calendar). People with a known email become ATTENDEEs
+    // carrying that role via ROLE/PARTSTAT, so occupancy round-trips on the next
+    // fetch; those without are reported back so the caller can add an email or a
+    // fanout rule instead of silently losing them.
     const ownerId = config.personIdForSource(p.source_id);
-    const occupantIds = p.occupants
-      ? expandGroups(p.occupants, config.family).filter((id) => id !== ownerId)
-      : [];
+    const roleByPerson = new Map<string, Role>();
+    for (const spec of occupantSpecs) {
+      for (const id of expandGroups([spec.id], config.family)) {
+        if (id === ownerId || roleByPerson.has(id)) continue;
+        roleByPerson.set(id, spec.role);
+      }
+    }
     const peopleById = new Map(config.family.people.map((pp) => [pp.id, pp]));
-    const attendees: { name: string; email: string }[] = [];
+    const attendees: { name: string; email: string; role: Role }[] = [];
     const unwritten: string[] = [];
-    const attendeeIds: string[] = [];
-    for (const id of occupantIds) {
+    for (const [id, role] of roleByPerson) {
       const person = peopleById.get(id);
       const email = person?.emails?.[0];
       if (person && email) {
-        attendees.push({ name: person.name, email });
-        attendeeIds.push(id);
+        attendees.push({ name: person.name, email, role });
       } else {
         unwritten.push(id);
       }

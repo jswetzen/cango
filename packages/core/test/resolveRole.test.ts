@@ -137,6 +137,42 @@ const cases: Case[] = [
     expectRole: "soft",
     expectBy: "rule",
   },
+  {
+    // A2: rules now sit ABOVE the soft heuristics. A tentative RSVP would be
+    // soft via the heuristic, but a matching rule overrides it to hard.
+    name: "precedence — rule overrides the tentative-RSVP soft heuristic",
+    buildEvent: () => event({ id: "e21", rsvpStatus: "tentative" }),
+    rules: [
+      rule({ match: { rsvpStatusIn: ["tentative"] }, role: "hard", reason: "always attend tentatives" }),
+    ],
+    expectRole: "hard",
+    expectBy: "rule",
+  },
+  {
+    // A2: a rule overrides the self-organized-solo soft heuristic.
+    name: "precedence — rule overrides the self-organized-solo soft heuristic",
+    buildEvent: () => event({ id: "e22", organizerIsSelf: true, attendeeCount: 1 }),
+    rules: [
+      rule({ match: { organizerIsSelf: true }, role: "hard", reason: "my solo blocks are real" }),
+    ],
+    expectRole: "hard",
+    expectBy: "rule",
+  },
+  {
+    // A2: declined sits ABOVE rules — no rule can resurrect a decline.
+    name: "precedence — declined stays info even with a conflicting rule",
+    buildEvent: () =>
+      event({ id: "e23", seriesId: "series-E", rsvpStatus: "declined" }),
+    rules: [
+      rule({
+        match: { personId: "p-me", seriesId: "series-E", rsvpStatusIn: ["declined"] },
+        role: "hard",
+        reason: "force attend",
+      }),
+    ],
+    expectRole: "info",
+    expectBy: "structural",
+  },
 ];
 
 describe("resolveRole layered resolution", () => {

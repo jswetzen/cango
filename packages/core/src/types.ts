@@ -1,15 +1,13 @@
-export type Role = "hard" | "soft" | "info" | "conditional";
+export type Role = "hard" | "soft" | "info";
 
-/** Blocking strength, high to low: hard > soft > conditional > info. Shared so
- * the fan-out and mask passes agree on which role is "stronger" when they raise
- * or cap an occupant's role. */
+/** Blocking strength, high to low: hard > soft > info. Shared so the fan-out and
+ * mask passes agree on which role is "stronger" when they raise or cap an
+ * occupant's role. */
 export function roleRank(role: Role): number {
   switch (role) {
     case "hard":
-      return 3;
-    case "soft":
       return 2;
-    case "conditional":
+    case "soft":
       return 1;
     case "info":
       return 0;
@@ -90,8 +88,15 @@ export interface CalEvent {
   attendeeCount?: number;
   /** Person ids matched from the event's ATTENDEE props via per-person emails.
    * Adapter-populated at fetch (and seeded by `createEvent` for write-back), so
-   * an event can occupy people beyond its calendar owner without a rule. */
+   * an event can occupy people beyond its calendar owner without a rule. The
+   * id-only projection of `attendees`, kept because the cache filters on it. */
   attendeeIds?: string[];
+  /** Per-attendee occupancy carrying the role each holds, read from the event's
+   * ATTENDEE `PARTSTAT`/`ROLE` props (ACCEPTED/REQ → hard, TENTATIVE/OPT → soft,
+   * DECLINED/NON → info). `role` is omitted when the source carries no such
+   * signal (or PARTSTAT=NEEDS-ACTION), in which case the occupant inherits the
+   * event's base role at resolution — preserving pre-per-role behaviour. */
+  attendees?: Array<{ personId: string; role?: Role }>;
   recurring?: boolean;
   raw?: unknown;
 }
@@ -182,7 +187,7 @@ export interface FreeSlot {
 }
 
 export interface ExplainTraceEntry {
-  layer: "structural" | "rule" | "default" | "mask" | "fanout";
+  layer: "structural" | "heuristic" | "rule" | "default" | "mask" | "fanout";
   outcome: string;
 }
 

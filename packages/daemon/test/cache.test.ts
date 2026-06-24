@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Cache } from "../src/cache.ts";
 import type { CalEvent, ResolvedEvent } from "@cango/core";
 
@@ -114,6 +118,98 @@ describe("Cache", () => {
       new Date("2026-06-02T00:00:00Z"),
     );
     expect(got!.attendeeIds).toEqual(["p-wife", "p-kid"]);
+  });
+
+  test("attendees (per-occupant roles) round-trip through the cache", () => {
+    cache.replaceSourceEvents("src-a", [
+      ev({
+        id: "e1",
+        attendeeIds: ["p-wife", "p-kid"],
+        attendees: [
+          { personId: "p-wife", role: "soft" },
+          { personId: "p-kid", role: "info" },
+        ],
+      }),
+    ]);
+    const [got] = cache.eventsInWindow(
+      new Date("2026-06-01T00:00:00Z"),
+      new Date("2026-06-02T00:00:00Z"),
+    );
+    expect(got!.attendees).toEqual([
+      { personId: "p-wife", role: "soft" },
+      { personId: "p-kid", role: "info" },
+    ]);
+    // The id-only projection still round-trips alongside the role-carrying field.
+    expect(got!.attendeeIds).toEqual(["p-wife", "p-kid"]);
+  });
+
+  test("a role-less attendee survives the round-trip with role omitted", () => {
+    cache.replaceSourceEvents("src-a", [
+      ev({ id: "e1", attendees: [{ personId: "p-wife" }] }),
+    ]);
+    const [got] = cache.eventsInWindow(
+      new Date("2026-06-01T00:00:00Z"),
+      new Date("2026-06-02T00:00:00Z"),
+    );
+    expect(got!.attendees).toEqual([{ personId: "p-wife" }]);
+  });
+
+  test("a legacy events row without attendees_json still reads (migrates in place)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cango-cache-legacy-"));
+    const path = join(dir, "cache.db");
+    try {
+      // Hand-build a pre-attendees_json events table with one row.
+      const raw = new Database(path, { create: true });
+      raw.run(`
+        CREATE TABLE events (
+          id TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          person_id TEXT NOT NULL,
+          series_id TEXT,
+          start_ms INTEGER NOT NULL,
+          end_ms INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          all_day INTEGER NOT NULL DEFAULT 0,
+          attendee_ids_json TEXT NOT NULL DEFAULT '[]',
+          raw_json TEXT NOT NULL,
+          fetched_at INTEGER NOT NULL,
+          PRIMARY KEY (source_id, id)
+        )`);
+      const rawJson = JSON.stringify({
+        id: "legacy",
+        sourceId: "src-a",
+        personId: "p-me",
+        title: "Old event",
+        start: "2026-06-01T10:00:00.000Z",
+        end: "2026-06-01T11:00:00.000Z",
+        allDay: false,
+      });
+      raw.run(
+        `INSERT INTO events
+           (id, source_id, person_id, series_id, start_ms, end_ms, title, all_day, attendee_ids_json, raw_json, fetched_at)
+         VALUES ('legacy', 'src-a', 'p-me', NULL, ?, ?, 'Old event', 0, '[]', ?, 1)`,
+        [
+          new Date("2026-06-01T10:00:00Z").getTime(),
+          new Date("2026-06-01T11:00:00Z").getTime(),
+          rawJson,
+        ],
+      );
+      raw.close();
+
+      // Opening through Cache must ALTER in attendees_json and read the old row.
+      const migrated = new Cache(path);
+      const [got] = migrated.eventsInWindow(
+        new Date("2026-06-01T00:00:00Z"),
+        new Date("2026-06-02T00:00:00Z"),
+      );
+      expect(got!.id).toBe("legacy");
+      expect(got!.title).toBe("Old event");
+      // No attendees_json data → role-less, so attendees stays unset.
+      expect(got!.attendees).toBeUndefined();
+      migrated.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("recentSeries groups by series", () => {

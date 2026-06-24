@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { fetchEvents } from "../src/fetchEvents.js";
+import { fetchEvents, parseIcs } from "../src/fetchEvents.js";
 import type { IcsFetcher, IcsSourceConfig } from "../src/fetchEvents.js";
 
 const fixturesDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
@@ -102,6 +102,63 @@ describe("@cango/adapter-ics fetchEvents", () => {
     const declined = events.find((e) => e.id === "invite-001@cango.test")!;
     // me@ maps to p-me; bob@example.com is external and dropped.
     expect(declined.attendeeIds).toEqual(["p-me"]);
+  });
+
+  it("populates attendees carrying the role read from each ATTENDEE's PARTSTAT/ROLE", async () => {
+    const resolveAttendeeIds = (emails: string[]) =>
+      emails.flatMap((e) => (e.toLowerCase() === "me@cango.test" ? ["p-me"] : []));
+    const events = await fetchEvents(
+      baseConfig({ resolveAttendeeIds }),
+      { start: new Date("2026-06-01T00:00:00Z"), end: new Date("2026-06-30T00:00:00Z") },
+      { fetcher: fixtureFetcher("with-rsvp.ics") },
+    );
+    // invite-001: me@ has PARTSTAT=DECLINED → role info.
+    const declined = events.find((e) => e.id === "invite-001@cango.test")!;
+    expect(declined.attendees).toEqual([{ personId: "p-me", role: "info" }]);
+    // self-organized-001: me@ has PARTSTAT=ACCEPTED → role hard.
+    const focus = events.find((e) => e.id === "self-organized-001@cango.test")!;
+    expect(focus.attendees).toEqual([{ personId: "p-me", role: "hard" }]);
+    // attendeeIds is the id-only projection of attendees.
+    expect(declined.attendeeIds).toEqual(declined.attendees!.map((a) => a.personId));
+  });
+
+  it("omits the role for a NEEDS-ACTION attendee (occupant inherits the event role)", () => {
+    const ics = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//Cango Test//EN",
+      "BEGIN:VEVENT",
+      "UID:needs-action-001@cango.test",
+      "SUMMARY:Unanswered",
+      "DTSTAMP:20260601T080000Z",
+      "DTSTART:20260610T140000Z",
+      "DTEND:20260610T150000Z",
+      "ATTENDEE;CN=Me;PARTSTAT=NEEDS-ACTION:mailto:me@cango.test",
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n");
+    const parsed = parseIcs(
+      ics,
+      {
+        sourceId: "src-test",
+        url: "obj.ics",
+        resolvePersonId: () => "p-me",
+        resolveAttendeeIds: (emails) =>
+          emails.flatMap((e) => (e.toLowerCase() === "me@cango.test" ? ["p-me"] : [])),
+      },
+      { start: new Date("2026-06-01T00:00:00Z"), end: new Date("2026-06-30T00:00:00Z") },
+    );
+    // PARTSTAT=NEEDS-ACTION and no usable ROLE → role omitted.
+    expect(parsed[0]!.attendees).toEqual([{ personId: "p-me" }]);
+  });
+
+  it("leaves attendees unset when no resolver is supplied", async () => {
+    const events = await fetchEvents(
+      baseConfig(),
+      { start: new Date("2026-06-01T00:00:00Z"), end: new Date("2026-06-30T00:00:00Z") },
+      { fetcher: fixtureFetcher("with-rsvp.ics") },
+    );
+    for (const e of events) expect(e.attendees).toBeUndefined();
   });
 
   it("leaves attendeeIds unset when no resolver is supplied", async () => {

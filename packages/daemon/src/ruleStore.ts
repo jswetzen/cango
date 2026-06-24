@@ -221,7 +221,8 @@ function rowToRule(row: RuleRow): Rule {
   const rule: Rule = {
     id: row.id,
     match: JSON.parse(row.match_json) as RuleMatch,
-    role: row.role as RuleRole,
+    // `conditional` was removed (it behaved like `info`); coerce any stored value.
+    role: (row.role === "conditional" ? "info" : row.role) as RuleRole,
     effect: row.effect as RuleEffect,
     reason: row.reason,
     createdAt: row.created_at,

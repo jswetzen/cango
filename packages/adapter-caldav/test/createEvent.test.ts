@@ -108,8 +108,10 @@ describe("createEvent", () => {
     const ics = writes[0]!.iCalString;
     const unfolded = ics.replace(/\r\n[ \t]/g, "");
     expect(unfolded).toContain("ORGANIZER:mailto:johan@cango.test");
+    // A role-less / default attendee now serializes as the `hard` mapping
+    // (REQ-PARTICIPANT/ACCEPTED), not the old hardcoded NEEDS-ACTION.
     expect(unfolded).toContain(
-      "ATTENDEE;CN=Wife;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:wife@cango.test",
+      "ATTENDEE;CN=Wife;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:wife@cango.test",
     );
     expect(unfolded).toContain("CN=Eli\\, Jr."); // escaped comma in CN
 
@@ -128,6 +130,61 @@ describe("createEvent", () => {
       { start: new Date("2026-06-16T10:00:00Z"), end: new Date("2026-06-16T13:00:00Z") },
     );
     expect(events[0]!.attendeeIds).toEqual(["p-wife", "p-eli"]);
+  });
+
+  it("serializes per-attendee roles to ROLE/PARTSTAT and round-trips the role", async () => {
+    const { client, writes } = captureClient([{ url: "https://cal/1/" }]);
+    await createEvent(
+      baseConfig(),
+      timedInput({
+        uid: "roles",
+        organizerEmail: "johan@cango.test",
+        attendees: [
+          { name: "Wife", email: "wife@cango.test", role: "soft" },
+          { name: "Kid", email: "kid@cango.test", role: "info" },
+          { name: "Boss", email: "boss@cango.test", role: "hard" },
+        ],
+      }),
+      { client },
+    );
+    const ics = writes[0]!.iCalString;
+    const unfolded = ics.replace(/\r\n[ \t]/g, "");
+    // soft → OPT/TENTATIVE, info → NON/DECLINED, hard → REQ/ACCEPTED.
+    expect(unfolded).toContain(
+      "ATTENDEE;CN=Wife;ROLE=OPT-PARTICIPANT;PARTSTAT=TENTATIVE:mailto:wife@cango.test",
+    );
+    expect(unfolded).toContain(
+      "ATTENDEE;CN=Kid;ROLE=NON-PARTICIPANT;PARTSTAT=DECLINED:mailto:kid@cango.test",
+    );
+    expect(unfolded).toContain(
+      "ATTENDEE;CN=Boss;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:boss@cango.test",
+    );
+
+    // Round-trip: the ICS parser reads each PARTSTAT back to the same role.
+    const events = parseIcs(
+      ics,
+      {
+        sourceId: "src-caldav",
+        url: "obj.ics",
+        resolvePersonId: () => "p-johan",
+        resolveAttendeeIds: (emails) =>
+          emails.flatMap((e) =>
+            e === "wife@cango.test"
+              ? ["p-wife"]
+              : e === "kid@cango.test"
+                ? ["p-kid"]
+                : e === "boss@cango.test"
+                  ? ["p-boss"]
+                  : [],
+          ),
+      },
+      { start: new Date("2026-06-16T10:00:00Z"), end: new Date("2026-06-16T13:00:00Z") },
+    );
+    expect(events[0]!.attendees).toEqual([
+      { personId: "p-wife", role: "soft" },
+      { personId: "p-kid", role: "info" },
+      { personId: "p-boss", role: "hard" },
+    ]);
   });
 
   it("emits no ORGANIZER/ATTENDEE lines when there are no attendees", async () => {

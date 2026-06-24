@@ -104,6 +104,31 @@ describe("RuleStore", () => {
     expect(store.active()).toHaveLength(3);
   });
 
+  test("a stored rule row with role 'conditional' reads back as 'info'", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cango-rules-cond-"));
+    const path = join(dir, "state.db");
+    try {
+      // Create the schema via RuleStore, then plant a row with the removed role.
+      const seeded = new RuleStore(path);
+      seeded.close();
+
+      const raw = new Database(path, { create: true });
+      raw.run(
+        `INSERT INTO rules (id, match_json, role, effect, occupants_json, reason, created_at, updated_at, retracted_at)
+         VALUES ('cond', '{"seriesId":"s"}', 'conditional', 'self', NULL, 'legacy conditional', 1, 1, NULL)`,
+      );
+      raw.close();
+
+      const store = new RuleStore(path);
+      const rule = store.get("cond")!;
+      expect(rule.role).toBe("info");
+      expect(store.active()[0]!.role).toBe("info");
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("v1 → v2 migration adds occupants_json and keeps existing rules", () => {
     const dir = mkdtempSync(join(tmpdir(), "cango-rules-"));
     const path = join(dir, "state.db");

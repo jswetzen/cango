@@ -20,6 +20,10 @@ people:
   - id: p-me
     name: Me
     sourceIds: [src-cal, src-ro, src-ics]
+    emails: [me@cango.test]
+  - id: p-wife
+    name: Wife
+    emails: [wife@cango.test]
 sources:
   - id: src-cal
     kind: caldav
@@ -59,13 +63,27 @@ const FAMILY_YAML_STHLM = FAMILY_YAML.replace(
 // pulls into the cache). `written` keeps the exact instants the daemon handed
 // the adapter, so a test can assert the all-day date-anchoring (the real
 // adapter turns these UTC fields into a `VALUE=DATE`).
+interface WrittenAttendee {
+  name: string;
+  email: string;
+  role?: string;
+}
 interface Written {
   title: string;
   start: Date;
   end: Date;
   allDay: boolean;
+  attendees?: WrittenAttendee[];
 }
-function fakeAdapters(): { adapters: Adapters; written: Written[] } {
+
+// Map an attendee's serialized ROLE/PARTSTAT-equivalent role back from the role
+// the daemon handed the adapter (the real adapter would round-trip via
+// PARTSTAT). `resolveEmail` turns an attendee email into a known person id so the
+// fetched-back event carries `attendees: [{personId, role}]` like a real refresh.
+function fakeAdapters(resolveEmail: (email: string) => string | undefined): {
+  adapters: Adapters;
+  written: Written[];
+} {
   const written: Written[] = [];
   let stored: CalEvent[] = [];
   const adapters: Adapters = {
@@ -78,6 +96,14 @@ function fakeAdapters(): { adapters: Adapters; written: Written[] } {
         start: input.start,
         end: input.end,
         allDay: input.allDay,
+        ...(input.attendees ? { attendees: input.attendees } : {}),
+      });
+      // Model the server storing each ATTENDEE; on the next fetch the adapter
+      // reads PARTSTAT/ROLE back into attendees carrying the role.
+      const attendees = (input.attendees ?? []).flatMap((a) => {
+        const personId = resolveEmail(a.email);
+        if (!personId) return [];
+        return [a.role !== undefined ? { personId, role: a.role } : { personId }];
       });
       stored = [
         {
@@ -88,6 +114,9 @@ function fakeAdapters(): { adapters: Adapters; written: Written[] } {
           start: input.start,
           end: input.end,
           allDay: input.allDay,
+          ...(attendees.length > 0
+            ? { attendees, attendeeIds: attendees.map((x) => x.personId) }
+            : {}),
         },
       ];
       return uid;
@@ -115,7 +144,7 @@ describe("daemon createEvent over the socket", () => {
     config = await loadConfig(familyPath);
     cache = new Cache(":memory:");
     rules = new RuleStore(":memory:");
-    const fake = fakeAdapters();
+    const fake = fakeAdapters((email) => config.resolveAttendeeIds([email])[0]);
     written = fake.written;
     // Pin the clock near the event so the warm refresh window covers it.
     const now = () => new Date("2026-06-10T00:00:00Z").getTime();
@@ -158,6 +187,60 @@ describe("daemon createEvent over the socket", () => {
       people: ["p-me"],
     })) as { events: Array<{ title: string }> };
     expect(list.events.map((e) => e.title)).toContain("Torpkonferensen");
+  });
+
+  test("an occupant with role soft writes a TENTATIVE ATTENDEE and resolves soft", async () => {
+    const res = (await rpcCall(socketPath, "createEvent", {
+      source_id: "src-cal",
+      title: "Saras läger",
+      start: "2026-06-16T09:00:00Z",
+      end: "2026-06-16T10:00:00Z",
+      occupants: [{ id: "p-wife", role: "soft" }],
+    })) as {
+      event: {
+        resolved_role: string;
+        occupants?: Array<{ person_id: string; role: string }>;
+      };
+      unwritten_occupants?: string[];
+    };
+
+    // The daemon handed the adapter a soft-role ATTENDEE for the wife.
+    expect(written).toHaveLength(1);
+    expect(written[0]!.attendees).toEqual([
+      { name: "Wife", email: "wife@cango.test", role: "soft" },
+    ]);
+    // She has a known email, so nothing went unwritten.
+    expect(res.unwritten_occupants).toBeUndefined();
+
+    // After the write-through refresh the created event resolves the wife to
+    // soft — her own role, not the event's base hard role.
+    const occ = Object.fromEntries(
+      (res.event.occupants ?? []).map((o) => [o.person_id, o.role]),
+    );
+    expect(res.event.resolved_role).toBe("hard"); // owner's base role
+    expect(occ["p-wife"]).toBe("soft");
+    expect(occ["p-me"]).toBe("hard");
+  });
+
+  test("a bare-string occupant yields a hard occupant", async () => {
+    const res = (await rpcCall(socketPath, "createEvent", {
+      source_id: "src-cal",
+      title: "Family dinner",
+      start: "2026-06-17T09:00:00Z",
+      end: "2026-06-17T10:00:00Z",
+      occupants: ["p-wife"],
+    })) as {
+      event: { occupants?: Array<{ person_id: string; role: string }> };
+    };
+
+    // A bare string is shorthand for role "hard" → REQ/ACCEPTED ATTENDEE.
+    expect(written[0]!.attendees).toEqual([
+      { name: "Wife", email: "wife@cango.test", role: "hard" },
+    ]);
+    const occ = Object.fromEntries(
+      (res.event.occupants ?? []).map((o) => [o.person_id, o.role]),
+    );
+    expect(occ["p-wife"]).toBe("hard");
   });
 
   test("rejects writing to a non-writable caldav source", async () => {
@@ -229,7 +312,7 @@ describe("daemon createEvent all-day date anchoring (Europe/Stockholm)", () => {
     config = await loadConfig(familyPath);
     cache = new Cache(":memory:");
     rules = new RuleStore(":memory:");
-    const fake = fakeAdapters();
+    const fake = fakeAdapters((email) => config.resolveAttendeeIds([email])[0]);
     written = fake.written;
     const now = () => new Date("2026-06-25T00:00:00Z").getTime();
     refresher = new Refresher(cache, config, { now, adapters: fake.adapters });

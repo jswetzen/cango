@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import type { CalEvent, Occupant, ResolvedEvent } from "@cango/core";
+import type { CalEvent, Occupant, ResolvedEvent, Role } from "@cango/core";
 
 export interface SourceStatus {
   id: string;
@@ -21,6 +21,11 @@ interface EventRow {
    * as a column (not just inside raw_json) so the person filter can widen to
    * events that occupy a requested person via ATTENDEE, not only ownership. */
   attendee_ids_json: string;
+  /** JSON array of `{personId, role?}` carrying each attendee's occupancy role.
+   * Distinct from `attendee_ids_json` on purpose: the id-only column drives the
+   * cheap SQL `LIKE` person filter, while this one carries the per-attendee role
+   * needed at *resolution* so a cache round-trip doesn't flatten roles. */
+  attendees_json: string;
   raw_json: string;
   fetched_at: number;
 }
@@ -59,6 +64,7 @@ export class Cache {
         title TEXT NOT NULL,
         all_day INTEGER NOT NULL DEFAULT 0,
         attendee_ids_json TEXT NOT NULL DEFAULT '[]',
+        attendees_json TEXT NOT NULL DEFAULT '[]',
         raw_json TEXT NOT NULL,
         fetched_at INTEGER NOT NULL,
         PRIMARY KEY (source_id, id)
@@ -68,6 +74,14 @@ export class Cache {
     // disposable, but ALTER avoids a forced full refetch on upgrade).
     if (!this.hasColumn("events", "attendee_ids_json")) {
       this.db.run(`ALTER TABLE events ADD COLUMN attendee_ids_json TEXT NOT NULL DEFAULT '[]'`);
+    }
+    // attendees_json (ids + roles) is a separate column from attendee_ids_json:
+    // the latter stays the authoritative id-only column the person filter LIKEs
+    // against, the former carries the per-attendee role used at resolution. A
+    // pre-existing row defaults to '[]' here and resolves role-less (today's
+    // behaviour) until the next refresh rewrites it — no backfill needed.
+    if (!this.hasColumn("events", "attendees_json")) {
+      this.db.run(`ALTER TABLE events ADD COLUMN attendees_json TEXT NOT NULL DEFAULT '[]'`);
     }
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_events_window ON events (start_ms, end_ms)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_events_person ON events (person_id)`);
@@ -99,8 +113,8 @@ export class Cache {
       const insert = this.db.prepare(`
         INSERT INTO events
           (id, source_id, person_id, series_id, start_ms, end_ms, title, all_day,
-           attendee_ids_json, raw_json, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           attendee_ids_json, attendees_json, raw_json, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const e of rows) {
         insert.run(
@@ -112,7 +126,9 @@ export class Cache {
           e.end.getTime(),
           e.title,
           e.allDay ? 1 : 0,
+          // ids (filter) and full attendees with roles (resolution) side by side.
           JSON.stringify(e.attendeeIds ?? []),
+          JSON.stringify(e.attendees ?? []),
           JSON.stringify(serializeEvent(e)),
           fetchedAt,
         );
@@ -345,6 +361,11 @@ function rowToEvent(row: EventRow): CalEvent {
   // and migrations key off); fall back to whatever raw_json carried.
   const ids = parseIds(row.attendee_ids_json);
   if (ids.length > 0) event.attendeeIds = ids;
+  // attendees_json carries the per-attendee roles dropped by the id-only column;
+  // restoring it lets re-resolution honour each occupant's role. A pre-existing
+  // row has '[]' here and stays role-less until refreshed.
+  const attendees = parseAttendees(row.attendees_json);
+  if (attendees.length > 0) event.attendees = attendees;
   return event;
 }
 
@@ -358,6 +379,32 @@ function parseIds(json: string | null | undefined): string[] {
   try {
     const v = JSON.parse(json);
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+const ROLES: ReadonlySet<Role> = new Set<Role>(["hard", "soft", "info"]);
+
+/** Defensively parse the stored `{personId, role?}[]`: drop entries without a
+ * string `personId`, and keep `role` only when it's a known Role (else omit it,
+ * so the occupant inherits the event's base role like a role-less attendee). */
+function parseAttendees(json: string | null | undefined): NonNullable<CalEvent["attendees"]> {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    if (!Array.isArray(v)) return [];
+    const out: NonNullable<CalEvent["attendees"]> = [];
+    for (const entry of v) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const { personId, role } = entry as { personId?: unknown; role?: unknown };
+      if (typeof personId !== "string") continue;
+      out.push({
+        personId,
+        ...(typeof role === "string" && ROLES.has(role as Role) ? { role: role as Role } : {}),
+      });
+    }
+    return out;
   } catch {
     return [];
   }

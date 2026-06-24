@@ -5,7 +5,13 @@ import { z } from "zod";
 import type { FamilyGraph, Role, RuleMatch } from "@cango/core";
 import { isValidTimeZone } from "./tz.ts";
 
-const roleSchema = z.enum(["hard", "soft", "info", "conditional"]);
+// `conditional` was removed — it resolved identically to `info` in every
+// consumer. Coerce any value lingering in an existing family.yaml so the daemon
+// still loads rather than failing the enum.
+const roleSchema = z.preprocess(
+  (v) => (v === "conditional" ? "info" : v),
+  z.enum(["hard", "soft", "info"]),
+);
 const rsvpSchema = z.enum(["accepted", "tentative", "declined", "needsAction"]);
 
 const sourceKindSchema = z.enum(["ics", "caldav"]);
@@ -122,7 +128,10 @@ export const ruleMatchSchema = z.object({
   rsvp_status_in: z.array(rsvpSchema).optional(),
 });
 
-export const ruleRoleSchema = z.enum(["hard", "soft", "info", "conditional", "inherit"]);
+export const ruleRoleSchema = z.preprocess(
+  (v) => (v === "conditional" ? "info" : v),
+  z.enum(["hard", "soft", "info", "inherit"]),
+);
 export const ruleEffectSchema = z.enum(["self", "mask", "fanout"]);
 
 /** snake_case wire match → core `RuleMatch`. Conditional spreads keep optional
