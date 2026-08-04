@@ -7,6 +7,7 @@ import {
   expandConnectionEnv,
   expandEnvVars,
   familyFileSchema,
+  loadConfig,
   YamlFamilySource,
 } from "../src/config.ts";
 
@@ -80,6 +81,60 @@ describe("conditional role coercion", () => {
     // And it survives into the built FamilyGraph as a concrete Role.
     const { family } = buildFamily(file);
     expect(family.sources[0]!.defaultRole).toBe("info");
+  });
+});
+
+// Regression: checkReferences used to run only in the standalone validator, so
+// a family.yaml with dangling references loaded and ran with no complaint —
+// a typo'd defaultOccupants group id silently occupied nobody.
+describe("loadConfig surfaces cross-reference issues", () => {
+  function withTempFamily(yaml: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "cango-refs-"));
+    const path = join(dir, "family.yaml");
+    writeFileSync(path, yaml);
+    return path;
+  }
+
+  test("reports an unknown defaultOccupants group without failing the load", async () => {
+    const path = withTempFamily(`
+people:
+  - id: p-me
+    name: Me
+    sourceIds: [src-ics]
+sources:
+  - id: src-ics
+    kind: ics
+    ownedBy: person
+    ownerId: p-me
+    defaultRole: soft
+    defaultOccupants: [kidz]
+    url: https://example.invalid/cal.ics
+`);
+    const config = await loadConfig(path);
+    // Still loads — the daemon serves it, it just says so.
+    expect(config.connections).toHaveLength(1);
+    expect(config.issues.map((i) => i.path)).toEqual(["sources[0].defaultOccupants[0]"]);
+    expect(config.issues[0]!.message).toMatch(/unknown person\/group "kidz"/);
+    rmSync(join(path, ".."), { recursive: true, force: true });
+  });
+
+  test("a clean config reports no issues", async () => {
+    const path = withTempFamily(`
+people:
+  - id: p-me
+    name: Me
+    sourceIds: [src-ics]
+sources:
+  - id: src-ics
+    kind: ics
+    ownedBy: person
+    ownerId: p-me
+    defaultRole: soft
+    url: https://example.invalid/cal.ics
+`);
+    const config = await loadConfig(path);
+    expect(config.issues).toEqual([]);
+    rmSync(join(path, ".."), { recursive: true, force: true });
   });
 });
 

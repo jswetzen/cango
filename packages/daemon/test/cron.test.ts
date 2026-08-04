@@ -5,24 +5,25 @@ import { buildFamily, type LoadedConfig } from "../src/config.ts";
 import type { Adapters } from "../src/sources.ts";
 import type { CalEvent } from "@cango/core";
 
-function makeConfig(): LoadedConfig {
+function makeConfig(
+  sourceIds: string[] = ["src-ics"],
+  refreshIntervalMinutes = 60,
+): LoadedConfig {
   const { family, connections, settings, attendanceSeed } = buildFamily({
-    people: [{ id: "p-me", name: "Me", sourceIds: ["src-ics"] }],
+    people: [{ id: "p-me", name: "Me", sourceIds }],
     organizations: [],
-    sources: [
-      {
-        id: "src-ics",
-        kind: "ics",
-        defaultRole: "hard",
-        ownedBy: "person",
-        ownerId: "p-me",
-        url: "https://example.invalid/cal.ics",
-        writable: false,
-      },
-    ],
+    sources: sourceIds.map((id) => ({
+      id,
+      kind: "ics" as const,
+      defaultRole: "hard" as const,
+      ownedBy: "person" as const,
+      ownerId: "p-me",
+      url: "https://example.invalid/cal.ics",
+      writable: false,
+    })),
     groups: [],
     attendance: [],
-    settings: { refreshIntervalMinutes: 60, maxStaleHours: 6, timezone: "UTC" },
+    settings: { refreshIntervalMinutes, maxStaleHours: 6, timezone: "UTC" },
   });
   return {
     family,
@@ -32,6 +33,7 @@ function makeConfig(): LoadedConfig {
     resolveAttendeeIds: () => [],
     familyVersion: "fv",
     attendanceSeed,
+    issues: [],
   };
 }
 
@@ -88,6 +90,62 @@ describe("Refresher", () => {
     expect(status.lastError).toBe("network down");
     expect(status.lastErrorAt).toBe(2_000);
     expect(status.lastSuccessAt).toBeNull();
+  });
+
+  // Each scheduled timer closes over its own connection, so without explicit
+  // cancellation a source dropped from family.yaml keeps fetching on the old
+  // schedule — re-inserting the very rows the reload-time prune just dropped.
+  test("setConfig unschedules a source dropped from config", async () => {
+    const logs: string[] = [];
+    const refresher = new Refresher(cache, makeConfig(["src-a", "src-b"]), {
+      adapters: stubAdapters([]),
+      log: (m) => logs.push(m),
+    });
+    // start() is what creates the per-source timers setConfig has to cancel.
+    await refresher.start();
+    refresher.setConfig(makeConfig(["src-a"]));
+    expect(logs).toContain("unscheduled removed source: src-b");
+    expect(logs).not.toContain("unscheduled removed source: src-a");
+    refresher.stop();
+  });
+
+  test("a removed source's timer does not resurrect pruned events", async () => {
+    // 60ms refresh interval: without cancellation the timer fires during the
+    // wait below and re-populates src-b.
+    const config = makeConfig(["src-a", "src-b"], 0.001);
+    const stampBySource: Adapters = {
+      fetchIcs: async (cfg) => [
+        {
+          id: `e-${cfg.sourceId}`,
+          sourceId: cfg.sourceId,
+          personId: "p-me",
+          title: "Mtg",
+          start: new Date("2026-06-01T10:00:00Z"),
+          end: new Date("2026-06-01T11:00:00Z"),
+          allDay: false,
+        },
+      ],
+      fetchCalDav: async () => [],
+      createCalDav: async () => "stub-uid",
+    };
+    const refresher = new Refresher(cache, config, { adapters: stampBySource });
+    await refresher.start();
+
+    const ids = () =>
+      cache
+        .eventsInWindow(new Date("2026-06-01T00:00:00Z"), new Date("2026-06-02T00:00:00Z"))
+        .map((e) => e.id)
+        .sort();
+    expect(ids()).toEqual(["e-src-a", "e-src-b"]);
+
+    // Mirror a reload that drops src-b.
+    refresher.setConfig(makeConfig(["src-a"], 0.001));
+    cache.pruneUnknownSources(["src-a"]);
+    expect(ids()).toEqual(["e-src-a"]);
+
+    await new Promise((r) => setTimeout(r, 300));
+    expect(ids()).toEqual(["e-src-a"]);
+    refresher.stop();
   });
 
   test("staleSources flags never-fetched and past-maxStale sources", () => {

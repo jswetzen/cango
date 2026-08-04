@@ -312,6 +312,14 @@ export interface LoadedConfig {
   familyVersion: string;
   /** Deprecated family.yaml attendance edges, for the one-time rule-store seed. */
   attendanceSeed: FamilyFile["attendance"];
+  /**
+   * Cross-reference problems found at load time. Non-fatal by design — the
+   * daemon still serves a config with dangling references — but the caller is
+   * expected to log them. Before this existed the checks ran only in the
+   * standalone validator, so a typo'd `defaultOccupants` group id loaded
+   * cleanly and silently occupied nobody.
+   */
+  issues: ValidationIssue[];
 }
 
 export interface FamilySource {
@@ -320,6 +328,7 @@ export interface FamilySource {
     connections: SourceConnection[];
     settings: DaemonSettings;
     attendanceSeed: FamilyFile["attendance"];
+    issues: ValidationIssue[];
   }>;
 }
 
@@ -386,9 +395,13 @@ export class YamlFamilySource implements FamilySource {
     connections: SourceConnection[];
     settings: DaemonSettings;
     attendanceSeed: FamilyFile["attendance"];
+    issues: ValidationIssue[];
   }> {
     const text = await readFile(this.path, "utf8");
     const parsed = familyFileSchema.parse(parseYaml(text) ?? {});
+    // Runs here, on the raw document, because `buildFamily` is exactly where the
+    // evidence is lost: it drops dangling sourceIds on the floor.
+    const issues = checkReferences(parsed);
     const built = buildFamily(parsed);
 
     const missing = new Set<string>();
@@ -403,7 +416,7 @@ export class YamlFamilySource implements FamilySource {
       );
     }
 
-    return { ...built, connections };
+    return { ...built, connections, issues };
   }
 }
 
@@ -470,7 +483,7 @@ export function buildFamily(file: FamilyFile): {
 
 export async function loadConfig(familyPath: string): Promise<LoadedConfig> {
   const familySource = new YamlFamilySource(familyPath);
-  const { family, connections, settings, attendanceSeed } = await familySource.load();
+  const { family, connections, settings, attendanceSeed, issues } = await familySource.load();
 
   const ownerBySource = new Map<string, { ownedBy: string; ownerId: string }>(
     family.sources.map((s) => [s.id, { ownedBy: s.ownedBy, ownerId: s.ownerId }]),
@@ -519,6 +532,7 @@ export async function loadConfig(familyPath: string): Promise<LoadedConfig> {
     resolveAttendeeIds,
     familyVersion: hashJson(family),
     attendanceSeed,
+    issues,
   };
 }
 

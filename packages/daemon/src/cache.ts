@@ -34,6 +34,13 @@ interface ResolvedRow {
   resolved_json: string;
 }
 
+/** What `pruneUnknownSources` dropped, per source, so the caller can log it. */
+export interface PrunedSource {
+  sourceId: string;
+  /** Cached events removed; 0 when only status/resolved rows lingered. */
+  events: number;
+}
+
 export class Cache {
   private readonly db: Database;
 
@@ -137,6 +144,59 @@ export class Cache {
       this.db.run("DELETE FROM resolved_cache WHERE source_id = ?", [sourceId]);
     });
     tx(events);
+  }
+
+  /**
+   * Drop every cached row belonging to a source that is no longer configured.
+   *
+   * `replaceSourceEvents` is keyed on the source being refreshed, so it only
+   * ever deletes rows for sources we still fetch. A source dropped from
+   * family.yaml is never fetched, so its backlog would otherwise sit in the
+   * cache forever — and resolve as `hard`, because `resolveDefault` can't find
+   * a registered source to read `defaultRole` from. That turns a removed feed
+   * into permanent phantom conflicts, duplicates of the same UID under its new
+   * source id, and event times frozen at the last fetch.
+   *
+   * Sweeps every table keyed on source_id, not just `events`: a stale `sources`
+   * row keeps reporting a last_error for a feed nobody fetches any more.
+   *
+   * Returns what was dropped rather than just a count — a silent purge is its
+   * own footgun, and a mistyped source id should be visible in the log.
+   */
+  pruneUnknownSources(knownSourceIds: string[]): PrunedSource[] {
+    const known = new Set(knownSourceIds);
+    const counts = new Map<string, number>();
+    const note = (id: string, n: number) => {
+      if (known.has(id)) return;
+      counts.set(id, (counts.get(id) ?? 0) + n);
+    };
+
+    const eventRows = this.db
+      .query(`SELECT source_id AS id, COUNT(*) AS n FROM events GROUP BY source_id`)
+      .all() as Array<{ id: string; n: number }>;
+    for (const r of eventRows) note(r.id, r.n);
+    const resolvedRows = this.db
+      .query(`SELECT DISTINCT source_id AS id FROM resolved_cache`)
+      .all() as Array<{ id: string }>;
+    for (const r of resolvedRows) note(r.id, 0);
+    const statusRows = this.db.query(`SELECT id FROM sources`).all() as Array<{ id: string }>;
+    for (const r of statusRows) note(r.id, 0);
+
+    if (counts.size === 0) return [];
+
+    // Filtering in JS keeps this correct when `knownSourceIds` is empty — a SQL
+    // `NOT IN ()` is a syntax error, and getting that wrong on the empty-config
+    // path would silently skip the purge.
+    const unknown = [...counts.keys()].sort();
+    const placeholders = unknown.map(() => "?").join(",");
+    const tx = this.db.transaction(() => {
+      this.db.run(`DELETE FROM events WHERE source_id IN (${placeholders})`, unknown);
+      this.db.run(`DELETE FROM resolved_cache WHERE source_id IN (${placeholders})`, unknown);
+      this.db.run(`DELETE FROM sources WHERE id IN (${placeholders})`, unknown);
+    });
+    tx();
+
+    return unknown.map((sourceId) => ({ sourceId, events: counts.get(sourceId) ?? 0 }));
   }
 
   /**

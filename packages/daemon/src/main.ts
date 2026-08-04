@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { Cache } from "./cache.ts";
 import { loadConfig, type LoadedConfig } from "./config.ts";
 import { Refresher } from "./cron.ts";
+import { reconcileConfig } from "./reconcile.ts";
 import { RuleStore } from "./ruleStore.ts";
 import { startServer } from "./server.ts";
 import type { RpcContext } from "./rpc.ts";
@@ -28,6 +29,7 @@ export async function main(): Promise<void> {
   let config: LoadedConfig = await loadConfig(familyPath);
 
   const cache = new Cache(dbPath);
+  reconcileConfig(cache, config, log);
   mkdirSync(dirname(statePath), { recursive: true });
   const ruleStore = new RuleStore(statePath);
   const seeded = ruleStore.seedFromAttendance(config.attendanceSeed);
@@ -43,7 +45,10 @@ export async function main(): Promise<void> {
     reload: async () => {
       log("reloading config");
       config = await loadConfig(familyPath);
+      // setConfig first: it cancels timers for removed sources, so nothing can
+      // re-fetch a source between the prune and the new schedule taking effect.
       refresher.setConfig(config);
+      reconcileConfig(cache, config, log);
       cache.clearResolvedCache();
     },
   };

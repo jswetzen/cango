@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Cache } from "../src/cache.ts";
 import { loadConfig, type LoadedConfig } from "../src/config.ts";
 import { Refresher } from "../src/cron.ts";
+import { reconcileConfig } from "../src/reconcile.ts";
 import { RuleStore } from "../src/ruleStore.ts";
 import { startServer, type SocketServer } from "../src/server.ts";
 import { rpcCall } from "../src/client.ts";
@@ -57,6 +58,43 @@ attendance:
     seriesId: club-training
     role: ATTENDS
     reason: on the squad
+`;
+
+/** FAMILY_YAML with src-club (and every reference to it) removed. */
+const FAMILY_YAML_WITHOUT_CLUB = `
+settings:
+  refreshIntervalMinutes: 60
+  maxStaleHours: 6
+people:
+  - id: p-me
+    name: Me
+    sourceIds: [src-work]
+  - id: p-kid
+    name: Kid
+    sourceIds: []
+groups:
+  - id: family
+    name: Everyone
+    memberIds: [p-me, p-kid]
+organizations:
+  - id: org-club
+    name: Club
+    sourceIds: []
+sources:
+  - id: src-work
+    kind: ics
+    ownedBy: person
+    ownerId: p-me
+    defaultRole: hard
+    url: https://example.invalid/work.ics
+  - id: src-family
+    kind: ics
+    ownedBy: person
+    ownerId: p-me
+    defaultRole: soft
+    defaultOccupants: [family]
+    url: https://example.invalid/family.ics
+attendance: []
 `;
 
 function event(p: Partial<CalEvent> & Pick<CalEvent, "id" | "title">): CalEvent {
@@ -127,8 +165,10 @@ describe("daemon e2e over the socket", () => {
       rules,
       refresher,
       reload: async () => {
+        // Mirrors main.ts's reload path, prune included.
         config = await loadConfig(familyPath);
         refresher.setConfig(config);
+        reconcileConfig(cache, config, () => {});
         cache.clearResolvedCache();
       },
     };
@@ -480,5 +520,31 @@ describe("daemon e2e over the socket", () => {
 
   test("unknown method returns an RPC error", async () => {
     await expect(rpcCall(socketPath, "nope")).rejects.toThrow(/method not found/);
+  });
+
+  // Regression: a source removed from family.yaml used to keep its cached
+  // events forever, and they flipped to `hard` (no registered source to read
+  // defaultRole from) — inventing conflicts on genuinely free slots.
+  test("reloadConfig evicts events for a source dropped from family.yaml", async () => {
+    const before = (await rpcCall(socketPath, "listEvents", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-02T00:00:00Z",
+      people: ["p-kid"],
+      extended: true,
+    })) as { events: Array<{ id: string; source_id: string }> };
+    expect(before.events.map((e) => e.id)).toContain("c1");
+
+    writeFileSync(familyPath, FAMILY_YAML_WITHOUT_CLUB);
+    await rpcCall(socketPath, "reloadConfig");
+
+    const after = (await rpcCall(socketPath, "listEvents", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-02T00:00:00Z",
+      extended: true,
+    })) as { events: Array<{ id: string; source_id: string }> };
+    expect(after.events.some((e) => e.source_id === "src-club")).toBe(false);
+    expect(after.events.some((e) => e.id === "c1")).toBe(false);
+    // Configured sources are untouched.
+    expect(after.events.some((e) => e.source_id === "src-work")).toBe(true);
   });
 });

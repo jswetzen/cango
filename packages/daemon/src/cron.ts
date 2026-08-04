@@ -49,9 +49,24 @@ export class Refresher {
     this.log = options.log ?? (() => {});
   }
 
-  /** Replace config on hot reload; existing schedules keep running. */
+  /**
+   * Replace config on hot reload; schedules for surviving sources keep running.
+   *
+   * Sources dropped from the new config have their timer cancelled and their
+   * state forgotten. Each timer closes over its own `connection`, so a removed
+   * source would otherwise keep fetching on the old schedule and re-populate
+   * the very rows `pruneUnknownSources` just dropped — making the reload-time
+   * prune undo itself within one refresh interval.
+   */
   setConfig(config: LoadedConfig): void {
     this.config = config;
+    const known = new Set(config.connections.map((c) => c.sourceId));
+    for (const [sourceId, state] of this.states) {
+      if (known.has(sourceId)) continue;
+      if (state.timer) clearTimeout(state.timer);
+      this.states.delete(sourceId);
+      this.log(`unscheduled removed source: ${sourceId}`);
+    }
   }
 
   private get baseIntervalMs(): number {
@@ -114,6 +129,9 @@ export class Refresher {
 
   private async runAndSchedule(connection: SourceConnection): Promise<void> {
     if (this.stopped) return;
+    // A reload may have dropped this source after the timer fired but before it
+    // ran; refreshing now would resurrect rows that were just pruned.
+    if (!this.isConfigured(connection.sourceId)) return;
     let failed = false;
     try {
       await this.refreshOnce(connection);
@@ -123,8 +141,13 @@ export class Refresher {
     this.schedule(connection, failed);
   }
 
+  private isConfigured(sourceId: string): boolean {
+    return this.config.connections.some((c) => c.sourceId === sourceId);
+  }
+
   private schedule(connection: SourceConnection, failed: boolean): void {
     if (this.stopped) return;
+    if (!this.isConfigured(connection.sourceId)) return;
     const state = this.stateFor(connection.sourceId);
     const delay = failed
       ? Math.min(this.baseIntervalMs * 2 ** state.consecutiveFailures, this.maxBackoffMs)

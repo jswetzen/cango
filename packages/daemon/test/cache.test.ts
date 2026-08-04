@@ -251,6 +251,66 @@ describe("Cache", () => {
     expect(cache.getResolved("src-a", "e1", "famv1", "rulev1")).toBeNull();
   });
 
+  describe("pruneUnknownSources", () => {
+    const window = () =>
+      cache.eventsInWindow(new Date("2026-06-01T00:00:00Z"), new Date("2026-07-01T00:00:00Z"));
+
+    test("retains a removed source's rows until pruned, then drops exactly those", () => {
+      cache.replaceSourceEvents("src-a", [ev({ id: "e1" }), ev({ id: "e2" })]);
+      cache.replaceSourceEvents("src-b", [ev({ id: "e3", sourceId: "src-b" })]);
+
+      // Nothing evicts on its own — this is the bug's precondition.
+      expect(window()).toHaveLength(3);
+
+      const pruned = cache.pruneUnknownSources(["src-b"]);
+      expect(pruned).toEqual([{ sourceId: "src-a", events: 2 }]);
+      expect(window().map((e) => e.id)).toEqual(["e3"]);
+    });
+
+    test("drops the removed source's resolved_cache and status rows too", () => {
+      cache.replaceSourceEvents("src-a", [ev({ id: "e1" })]);
+      const resolved: ResolvedEvent = {
+        ...ev({ id: "e1" }),
+        resolvedRole: "soft",
+        resolvedBy: "default",
+        resolvedReason: "x",
+        occupants: [{ personId: "p-me", role: "soft" }],
+      };
+      cache.putResolved("famv1", "rulev1", resolved);
+      cache.markError("src-a", "boom", 1000);
+      cache.markSuccess("src-b", 2000);
+
+      cache.pruneUnknownSources(["src-b"]);
+
+      expect(cache.getResolved("src-a", "e1", "famv1", "rulev1")).toBeNull();
+      expect(cache.sourceStatuses().map((s) => s.id)).toEqual(["src-b"]);
+    });
+
+    test("leaves configured sources untouched and reports nothing to prune", () => {
+      cache.replaceSourceEvents("src-a", [ev({ id: "e1" })]);
+      cache.markSuccess("src-a", 2000);
+      expect(cache.pruneUnknownSources(["src-a", "src-unused"])).toEqual([]);
+      expect(window().map((e) => e.id)).toEqual(["e1"]);
+      expect(cache.sourceStatuses()).toHaveLength(1);
+    });
+
+    test("an empty known-source list prunes everything", () => {
+      cache.replaceSourceEvents("src-a", [ev({ id: "e1" })]);
+      cache.replaceSourceEvents("src-b", [ev({ id: "e2", sourceId: "src-b" })]);
+      expect(cache.pruneUnknownSources([])).toEqual([
+        { sourceId: "src-a", events: 1 },
+        { sourceId: "src-b", events: 1 },
+      ]);
+      expect(window()).toHaveLength(0);
+    });
+
+    test("reports a source whose only trace is a status row", () => {
+      cache.markError("src-gone", "boom", 1000);
+      expect(cache.pruneUnknownSources([])).toEqual([{ sourceId: "src-gone", events: 0 }]);
+      expect(cache.sourceStatuses()).toHaveLength(0);
+    });
+  });
+
   test("markSuccess / markError tracked per source", () => {
     cache.markError("src-a", "boom", 1000);
     let st = cache.sourceStatuses();
