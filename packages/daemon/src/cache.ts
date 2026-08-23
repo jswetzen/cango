@@ -345,6 +345,7 @@ interface SerializedEvent {
   organizerIsSelf?: boolean;
   attendeeCount?: number;
   attendeeIds?: string[];
+  showsAsFree?: boolean;
   recurring?: boolean;
 }
 
@@ -362,6 +363,7 @@ function serializeEvent(e: CalEvent): SerializedEvent {
     ...(e.organizerIsSelf !== undefined ? { organizerIsSelf: e.organizerIsSelf } : {}),
     ...(e.attendeeCount !== undefined ? { attendeeCount: e.attendeeCount } : {}),
     ...(e.attendeeIds !== undefined ? { attendeeIds: e.attendeeIds } : {}),
+    ...(e.showsAsFree !== undefined ? { showsAsFree: e.showsAsFree } : {}),
     ...(e.recurring !== undefined ? { recurring: e.recurring } : {}),
   };
 }
@@ -380,6 +382,7 @@ function deserializeEvent(s: SerializedEvent): CalEvent {
     ...(s.organizerIsSelf !== undefined ? { organizerIsSelf: s.organizerIsSelf } : {}),
     ...(s.attendeeCount !== undefined ? { attendeeCount: s.attendeeCount } : {}),
     ...(s.attendeeIds !== undefined ? { attendeeIds: s.attendeeIds } : {}),
+    ...(s.showsAsFree !== undefined ? { showsAsFree: s.showsAsFree } : {}),
     ...(s.recurring !== undefined ? { recurring: s.recurring } : {}),
   };
 }
