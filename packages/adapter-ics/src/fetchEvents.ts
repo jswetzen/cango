@@ -60,6 +60,7 @@ function appendOccurrences(
   out: CalEvent[],
 ): void {
   if (!vevent.start || !vevent.end) return;
+  if (isCancelled(vevent)) return;
   const baseDurationMs = vevent.end.getTime() - vevent.start.getTime();
   if (baseDurationMs <= 0) return;
 
@@ -72,12 +73,20 @@ function appendOccurrences(
   const exDates = collectExDates(vevent);
 
   if (vevent.rrule) {
-    const occurrences = vevent.rrule.between(window.start, window.end, true);
-    for (const occStart of occurrences) {
-      const overrideKey = occurrenceKey(occStart);
-      if (exDates.has(overrideKey)) continue;
-      const override = overrides[overrideKey];
+    const shifted = Boolean(vevent.rrule.origOptions?.tzid);
+    // Padded because the raw occurrences are still shifted here; overlapsWindow filters below.
+    const occurrences = vevent.rrule.between(
+      new Date(window.start.getTime() - WINDOW_PAD_MS),
+      new Date(window.end.getTime() + WINDOW_PAD_MS),
+      true,
+    );
+    for (const rawOcc of occurrences) {
+      const occStart = shifted ? rruleOccurrenceToInstant(rawOcc) : rawOcc;
+      const dayKey = occurrenceDayKey(occStart);
+      if (exDates.has(dayKey)) continue;
+      const override = overrides[dayKey];
       if (override) {
+        if (isCancelled(override)) continue;
         const oStart = override.start;
         const oEnd = override.end;
         if (!oStart || !oEnd) continue;
@@ -92,7 +101,7 @@ function appendOccurrences(
       out.push(
         buildEvent({
           uid,
-          occurrenceKey: overrideKey,
+          occurrenceKey: occurrenceKey(occStart),
           vevent,
           config,
           personId,
@@ -221,8 +230,38 @@ function isAllDay(vevent: VEvent): boolean {
   return sameDayBoundary;
 }
 
+/** For a tzid-qualified series rrule 2.8.1 returns the occurrence's wall clock in the
+ * *process* zone stamped into the Date's UTC fields, not the instant. Reading those fields
+ * back through the local constructor inverts that, DST included. */
+function rruleOccurrenceToInstant(d: Date): Date {
+  return new Date(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate(),
+    d.getUTCHours(),
+    d.getUTCMinutes(),
+    d.getUTCSeconds(),
+    d.getUTCMilliseconds(),
+  );
+}
+
+/** Wider than any real UTC offset, so the shift correction can't lose an edge occurrence. */
+const WINDOW_PAD_MS = 26 * 60 * 60 * 1000;
+
+/** Event id suffix. Full precision, unlike the override lookup key below. */
 function occurrenceKey(d: Date): string {
   return d.toISOString();
+}
+
+/** Lookup key for `recurrences` / `exdate`: node-ical keys both by UTC date, not timestamp. */
+function occurrenceDayKey(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/** Outlook publishes cancellations as a CANCELLED VEVENT rather than dropping it from the feed. */
+function isCancelled(vevent: VEvent): boolean {
+  const status = (vevent as { status?: unknown }).status;
+  return typeof status === "string" && status.toUpperCase() === "CANCELLED";
 }
 
 function collectExDates(vevent: VEvent): Set<string> {
@@ -230,7 +269,7 @@ function collectExDates(vevent: VEvent): Set<string> {
   const raw = (vevent as { exdate?: unknown }).exdate;
   if (!raw || typeof raw !== "object") return out;
   for (const value of Object.values(raw as Record<string, unknown>)) {
-    if (value instanceof Date) out.add(occurrenceKey(value));
+    if (value instanceof Date) out.add(occurrenceDayKey(value));
   }
   return out;
 }
