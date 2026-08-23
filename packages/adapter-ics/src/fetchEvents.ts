@@ -187,6 +187,7 @@ function assembleCalEvent(args: {
   recurring: boolean;
 }): CalEvent {
   const { id, config, personId, seriesId, title, start, end, allDay, vevent, recurring } = args;
+  const showsAsFree = extractShowsAsFree(vevent);
   const rsvp = extractRsvp(vevent, config.selfEmail);
   const organizerIsSelf = isOrganizerSelf(vevent, config.selfEmail);
   const attendeeCount = countAttendees(vevent);
@@ -202,6 +203,7 @@ function assembleCalEvent(args: {
     end,
     allDay,
     recurring,
+    ...(showsAsFree ? { showsAsFree } : {}),
     ...(rsvp !== undefined ? { rsvpStatus: rsvp } : {}),
     ...(organizerIsSelf !== undefined ? { organizerIsSelf } : {}),
     ...(attendeeCount !== undefined ? { attendeeCount } : {}),
@@ -256,6 +258,17 @@ function occurrenceKey(d: Date): string {
 /** Lookup key for `recurrences` / `exdate`: node-ical keys both by UTC date, not timestamp. */
 function occurrenceDayKey(d: Date): string {
   return d.toISOString().slice(0, 10);
+}
+
+/** TRANSP:TRANSPARENT is the RFC 5545 spelling; Outlook's published feeds use the CDO
+ * property instead and leave TRANSP off entirely. A cancelled occurrence reaches us this way:
+ * STATUS stays CONFIRMED, only busy status flips to FREE. */
+function extractShowsAsFree(vevent: VEvent): boolean {
+  // node-ical strips the X- prefix from the key.
+  const cdo = (vevent as { "MICROSOFT-CDO-BUSYSTATUS"?: unknown })["MICROSOFT-CDO-BUSYSTATUS"];
+  if (typeof cdo === "string" && cdo.toUpperCase() === "FREE") return true;
+  const transp = (vevent as { transparency?: unknown }).transparency;
+  return typeof transp === "string" && transp.toUpperCase() === "TRANSPARENT";
 }
 
 /** Outlook publishes cancellations as a CANCELLED VEVENT rather than dropping it from the feed. */

@@ -32,6 +32,19 @@ const cases: Case[] = [
     expectBy: "structural",
   },
   {
+    name: "structural — showsAsFree becomes info",
+    buildEvent: () => event({ id: "e3b", showsAsFree: true }),
+    expectRole: "info",
+    expectBy: "structural",
+  },
+  {
+    name: "structural — showsAsFree outranks a rule (a cancelled slot stays free)",
+    buildEvent: () => event({ id: "e3c", seriesId: "series-A", showsAsFree: true }),
+    rules: [attendanceRule("p-me", "series-A", "ALWAYS_ATTENDS")],
+    expectRole: "info",
+    expectBy: "structural",
+  },
+  {
     name: "structural — tentative RSVP becomes soft",
     buildEvent: () => event({ id: "e4", rsvpStatus: "tentative" }),
     expectRole: "soft",

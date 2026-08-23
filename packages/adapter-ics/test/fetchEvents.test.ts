@@ -81,10 +81,12 @@ describe("@cango/adapter-ics fetchEvents", () => {
       const series = events
         .filter((e) => e.seriesId === "tzid-weekly@cango.test")
         .sort((a, b) => a.start.getTime() - b.start.getTime());
-      // 13:00 CEST is 11:00Z. Aug 17 moved to 09:00 local, Aug 24 cancelled, Aug 31 EXDATE.
+      // 13:00 CEST is 11:00Z. Aug 17 moved to 09:00 local, Aug 24 cancelled (kept, marked
+      // free — see below), Aug 31 EXDATE.
       expect(series.map((e) => e.start.toISOString())).toEqual([
         "2026-08-10T11:00:00.000Z",
         "2026-08-17T07:00:00.000Z",
+        "2026-08-24T11:00:00.000Z",
         "2026-09-07T11:00:00.000Z",
         "2026-09-14T11:00:00.000Z",
         "2026-09-21T11:00:00.000Z",
@@ -103,12 +105,31 @@ describe("@cango/adapter-ics fetchEvents", () => {
       expect(events.some((e) => e.start.toISOString() === "2026-08-17T11:00:00.000Z")).toBe(false);
     });
 
-    it("drops an occurrence cancelled via a RECURRENCE-ID override", async () => {
+    // Outlook's *published feed* does not use STATUS:CANCELLED for a cancelled occurrence
+    // (the single-event export does). It keeps STATUS:CONFIRMED and only marks it free.
+    it("flags a cancelled occurrence as showsAsFree rather than dropping it", async () => {
       const events = await fetchEvents(baseConfig(), window, {
         fetcher: fixtureFetcher("outlook-tzid.ics"),
       });
-      expect(events.some((e) => e.start.toISOString().startsWith("2026-08-24"))).toBe(false);
-      expect(events.some((e) => e.title.startsWith("Canceled:"))).toBe(false);
+      const cancelled = events.find((e) => e.start.toISOString() === "2026-08-24T11:00:00.000Z");
+      expect(cancelled).toBeDefined();
+      expect(cancelled!.title).toBe("Canceled: 1:1");
+      expect(cancelled!.showsAsFree).toBe(true);
+    });
+
+    it("leaves showsAsFree unset on a normal busy occurrence", async () => {
+      const events = await fetchEvents(baseConfig(), window, {
+        fetcher: fixtureFetcher("outlook-tzid.ics"),
+      });
+      const normal = events.find((e) => e.start.toISOString() === "2026-09-07T11:00:00.000Z");
+      expect(normal!.showsAsFree).toBeUndefined();
+    });
+
+    it("still drops a genuine STATUS:CANCELLED event", async () => {
+      const events = await fetchEvents(baseConfig(), window, {
+        fetcher: fixtureFetcher("outlook-tzid.ics"),
+      });
+      expect(events.some((e) => e.seriesId === "tzid-cancelled-status@cango.test")).toBe(false);
     });
 
     it("honours EXDATE", async () => {

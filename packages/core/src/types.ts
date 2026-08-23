@@ -86,6 +86,10 @@ export interface CalEvent {
   rsvpStatus?: RsvpStatus;
   organizerIsSelf?: boolean;
   attendeeCount?: number;
+  /** Event is published as not occupying the owner (Outlook's
+   * X-MICROSOFT-CDO-BUSYSTATUS:FREE). Also how a cancelled occurrence reaches us: Outlook's
+   * published feeds keep STATUS:CONFIRMED and only flip busy status to FREE. */
+  showsAsFree?: boolean;
   /** Person ids matched from the event's ATTENDEE props via per-person emails.
    * Adapter-populated at fetch (and seeded by `createEvent` for write-back), so
    * an event can occupy people beyond its calendar owner without a rule. The

@@ -38,12 +38,12 @@ export function resolveRoleWithTrace(
   const trace: ExplainTraceEntry[] = [];
 
   // A decline is authoritative — it outranks even an explicit rule ("I said no").
-  const declined = resolveDeclined(event);
+  const structural = resolveStructural(event);
   trace.push({
     layer: "structural",
-    outcome: declined ? describe(declined) : "no decline",
+    outcome: structural ? describe(structural) : "no decline",
   });
-  if (declined) return finalize(event, family, declined, trace);
+  if (structural) return finalize(event, family, structural, trace);
 
   // The mutable rule layer sits ABOVE the soft heuristics, so a rule can override
   // "self-organized solo → soft" / "RSVP tentative → soft" — the whole point of
@@ -95,14 +95,22 @@ function describe(r: Resolution): string {
   return `${r.role} (${r.by}): ${r.reason}`;
 }
 
-/** Authoritative structural signal: a declined invite is `info`, full stop. Sits
- * above the rule layer — no rule should resurrect an event you declined. */
-function resolveDeclined(event: CalEvent): Resolution | null {
+/** Authoritative structural signals: a declined invite is `info`, full stop, and so is an
+ * event the calendar itself publishes as free (a cancelled Outlook occurrence arrives that
+ * way). Sits above the rule layer — no rule should resurrect either. */
+function resolveStructural(event: CalEvent): Resolution | null {
   if (event.rsvpStatus === "declined") {
     return {
       role: "info",
       by: "structural",
       reason: "RSVP declined",
+    };
+  }
+  if (event.showsAsFree === true) {
+    return {
+      role: "info",
+      by: "structural",
+      reason: "calendar shows this as free",
     };
   }
   return null;
