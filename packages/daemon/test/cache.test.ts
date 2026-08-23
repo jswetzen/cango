@@ -120,6 +120,27 @@ describe("Cache", () => {
     expect(got!.attendeeIds).toEqual(["p-wife", "p-kid"]);
   });
 
+  // serializeEvent is an explicit allowlist, so a new CalEvent field is silently dropped here
+  // unless added in three places. That is how showsAsFree first shipped doing nothing: the
+  // adapter set it, the cache ate it, resolution never saw it.
+  test("showsAsFree round-trips through the cache", () => {
+    cache.replaceSourceEvents("src-a", [ev({ id: "e1", showsAsFree: true })]);
+    const [got] = cache.eventsInWindow(
+      new Date("2026-06-01T00:00:00Z"),
+      new Date("2026-06-02T00:00:00Z"),
+    );
+    expect(got!.showsAsFree).toBe(true);
+  });
+
+  test("showsAsFree stays unset for a normal busy event", () => {
+    cache.replaceSourceEvents("src-a", [ev({ id: "e1" })]);
+    const [got] = cache.eventsInWindow(
+      new Date("2026-06-01T00:00:00Z"),
+      new Date("2026-06-02T00:00:00Z"),
+    );
+    expect(got!.showsAsFree).toBeUndefined();
+  });
+
   test("attendees (per-occupant roles) round-trip through the cache", () => {
     cache.replaceSourceEvents("src-a", [
       ev({
