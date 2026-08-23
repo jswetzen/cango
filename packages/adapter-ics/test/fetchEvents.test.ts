@@ -70,6 +70,80 @@ describe("@cango/adapter-ics fetchEvents", () => {
     expect(new Set(events.map((e) => e.id)).size).toBe(events.length);
   });
 
+  // Absolute instants throughout: output must not depend on the process timezone.
+  describe("Outlook-style TZID feeds", () => {
+    const window = { start: new Date("2026-08-01T00:00:00Z"), end: new Date("2026-09-30T00:00:00Z") };
+
+    it("expands a TZID-qualified RRULE at the real instant, not the wall clock stamped as UTC", async () => {
+      const events = await fetchEvents(baseConfig(), window, {
+        fetcher: fixtureFetcher("outlook-tzid.ics"),
+      });
+      const series = events
+        .filter((e) => e.seriesId === "tzid-weekly@cango.test")
+        .sort((a, b) => a.start.getTime() - b.start.getTime());
+      // 13:00 CEST is 11:00Z. Aug 17 moved to 09:00 local, Aug 24 cancelled, Aug 31 EXDATE.
+      expect(series.map((e) => e.start.toISOString())).toEqual([
+        "2026-08-10T11:00:00.000Z",
+        "2026-08-17T07:00:00.000Z",
+        "2026-09-07T11:00:00.000Z",
+        "2026-09-14T11:00:00.000Z",
+        "2026-09-21T11:00:00.000Z",
+        "2026-09-28T11:00:00.000Z",
+      ]);
+    });
+
+    it("applies a RECURRENCE-ID override instead of the series time", async () => {
+      const events = await fetchEvents(baseConfig(), window, {
+        fetcher: fixtureFetcher("outlook-tzid.ics"),
+      });
+      const moved = events.find((e) => e.start.toISOString() === "2026-08-17T07:00:00.000Z");
+      expect(moved).toBeDefined();
+      expect(moved!.title).toBe("1:1 (moved)");
+      // and the un-moved series time for that day is gone entirely
+      expect(events.some((e) => e.start.toISOString() === "2026-08-17T11:00:00.000Z")).toBe(false);
+    });
+
+    it("drops an occurrence cancelled via a RECURRENCE-ID override", async () => {
+      const events = await fetchEvents(baseConfig(), window, {
+        fetcher: fixtureFetcher("outlook-tzid.ics"),
+      });
+      expect(events.some((e) => e.start.toISOString().startsWith("2026-08-24"))).toBe(false);
+      expect(events.some((e) => e.title.startsWith("Canceled:"))).toBe(false);
+    });
+
+    it("honours EXDATE", async () => {
+      const events = await fetchEvents(baseConfig(), window, {
+        fetcher: fixtureFetcher("outlook-tzid.ics"),
+      });
+      expect(events.some((e) => e.start.toISOString().startsWith("2026-08-31"))).toBe(false);
+    });
+
+    it("drops a standalone STATUS:CANCELLED event but keeps its live neighbour", async () => {
+      const events = await fetchEvents(baseConfig(), window, {
+        fetcher: fixtureFetcher("outlook-tzid.ics"),
+      });
+      expect(events.some((e) => e.seriesId === "tzid-standalone-cancelled@cango.test")).toBe(false);
+      const live = events.find((e) => e.seriesId === "tzid-standalone-live@cango.test");
+      expect(live).toBeDefined();
+      expect(live!.start.toISOString()).toBe("2026-08-13T08:00:00.000Z");
+    });
+
+    it("keeps the local wall clock fixed across a DST transition", async () => {
+      const events = await fetchEvents(
+        baseConfig(),
+        { start: new Date("2026-10-15T00:00:00Z"), end: new Date("2026-11-10T00:00:00Z") },
+        { fetcher: fixtureFetcher("tzid-dst.ics") },
+      );
+      // DST ends 2026-10-25; 13:00 local goes from 11:00Z to 12:00Z across it.
+      expect(events.map((e) => e.start.toISOString()).sort()).toEqual([
+        "2026-10-19T11:00:00.000Z",
+        "2026-10-26T12:00:00.000Z",
+        "2026-11-02T12:00:00.000Z",
+        "2026-11-09T12:00:00.000Z",
+      ]);
+    });
+  });
+
   it("extracts rsvpStatus, organizerIsSelf, attendeeCount when selfEmail provided", async () => {
     const events = await fetchEvents(
       baseConfig({ selfEmail: "me@cango.test" }),
